@@ -142,8 +142,7 @@ def main():
     print(f"accuracy: {accuracy:.4f}")
 
     report_dir = Path(args.report_dir)
-    plot_path = report_dir / f"confusion_{args.split}.png"
-    save_confusion_plot(matrix, plot_path)
+    report_dir.mkdir(parents=True, exist_ok=True)
 
     summary = {
         "split": args.split,
@@ -156,9 +155,21 @@ def main():
     }
     summary_path = report_dir / f"metrics_{args.split}.json"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(f"\nsaved {summary_path}")
 
-    print(f"\nsaved {plot_path}")
-    print(f"saved {summary_path}")
+    # The metrics are the output of this script; the PNG is a convenience, and
+    # the same matrix has already gone to stdout as text. Matplotlib is the one
+    # import here that fails for reasons that have nothing to do with the model
+    # -- no backend, a blocked DLL, an unwritable font cache -- and throwing
+    # away a finished evaluation over the picture is not a trade worth making.
+    # Hence: numbers first, plot second, and a warning rather than a traceback.
+    plot_path = report_dir / f"confusion_{args.split}.png"
+    try:
+        save_confusion_plot(matrix, plot_path)
+        print(f"saved {plot_path}")
+    except Exception as error:
+        print(f"\ncould not write {plot_path}: {error}")
+        print("the confusion matrix above is the same data.")
 
 
 if __name__ == "__main__":
