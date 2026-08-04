@@ -245,6 +245,58 @@ where provenance no longer predicts the label.
 
 Port 8100, so it does not collide with the triage backend on 8000.
 
+`/explain` puts its labels in `X-Prediction` and `X-Explained-Class` so a browser
+can point an `<img>` straight at the endpoint and still read what the picture
+says. Those are named in the CORS `expose_headers`; without that a cross-origin
+browser client sees only `content-type` and silently loses the label, which is
+how it was found.
+
+## Frontend
+
+`frontend/` is a plain HTML/CSS/JS page with no build step, no CDN and no
+framework, matching the triage app. Serve it alongside the API:
+
+```bash
+~/venvs/smt/Scripts/python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8100
+~/venvs/smt/Scripts/python.exe -m http.server 5501 --directory frontend
+```
+
+Then open `http://localhost:5501`. It guesses the API address from its own
+hostname, so serving both from the same machine needs no configuration; the
+gear icon overrides it otherwise.
+
+**From a phone on the same Wi-Fi**, open `http://<this-machine>:5501` and set
+the API address to `http://<this-machine>:8100` — the `--host 0.0.0.0` above is
+what makes the API reachable off localhost. Both phones can add it to the home
+screen and it runs without browser chrome. Note that the service worker only
+registers over HTTPS or on localhost, so over plain LAN HTTP the page works but
+is not available offline.
+
+Three deliberate choices in the UI:
+
+- **The classes are not colour-coded.** COVID19 is not red and NORMAL is not
+  green; every probability bar is the same colour and ranks by length alone. A
+  green bar reading "NORMAL 94%" is an all-clear that this model is not
+  entitled to give.
+- **The disclaimer is not dismissible** and sits above the fold at every size.
+- **Prediction and explanation are reported separately** whenever a class is
+  requested, because they come apart: the map answers "why not pneumonia?"
+  while the model's own call is still something else.
+
+### The out-of-distribution warning does not work
+
+`/predict` returns `low_confidence` when the top score is under 0.6, described
+in `app/main.py` as the only signal a caller gets that the image was out of
+distribution. It does not do that job. A flat grey square, uploaded through this
+frontend, is classified **COVID19 at 100.0% with no warning shown**.
+
+That is not a threshold that needs tuning. Softmax over three classes is
+confidently wrong on inputs unlike anything in training, and no cutoff on it
+separates "a chest X-ray it is sure about" from "not a chest X-ray at all".
+Detecting that needs something else entirely — an explicit reject class trained
+on non-X-ray images, or a distance-based score over the features rather than the
+logits. Until then, treat `low_confidence` as a weak hint and not a guard.
+
 ## Tests
 
 ```bash

@@ -66,11 +66,26 @@ async def lifespan(app):
 
 app = FastAPI(title="Chest X-ray Classifier", lifespan=lifespan)
 
+# /explain returns a PNG and puts the labels in headers, so a browser can point
+# an <img> straight at it and still read what the picture says. That only works
+# cross-origin if the headers are named here: allow_headers covers the request,
+# expose_headers covers the response, and without it a browser client sees
+# nothing but content-type and content-length. The frontend is served from a
+# different port, so this is the normal case rather than the exotic one.
+EXPOSED_HEADERS = [
+    "X-Prediction",
+    "X-Confidence",
+    "X-Explained-Class",
+    "X-Explained-Confidence",
+    "X-Disclaimer",
+]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=EXPOSED_HEADERS,
 )
 
 

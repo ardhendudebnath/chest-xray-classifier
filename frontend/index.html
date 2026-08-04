@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Chest X-ray Classifier</title>
+
+<meta name="description" content="Research prototype. Not a medical device.">
+<meta name="theme-color" content="#0f6fdd">
+<link rel="manifest" href="manifest.webmanifest">
+
+<!-- iOS ignores the manifest for home-screen installs and reads these instead.
+     Without them Safari opens the site in a normal browser tab with chrome. -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="CXR">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="icon" href="icons/icon-192.png">
+
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="bar">
+  <div class="bar-in">
+    <h1>Chest X-ray Classifier</h1>
+    <button id="settings-open" class="ghost" type="button" aria-label="Settings">⚙</button>
+  </div>
+</header>
+
+<!-- Not dismissible, and above the fold on every screen size. A prediction that
+     travels without this is the failure mode this whole project warns about. -->
+<div class="banner" role="note">
+  <strong>Research prototype — not a medical device.</strong>
+  Trained on public datasets whose classes are separable by which hospital
+  produced the image. Not validated on any clinical population. Nothing here is
+  a diagnosis. <a href="#about">Why to distrust it</a>.
+</div>
+
+<main class="shell">
+
+  <section class="card" id="upload-card">
+    <h2>1 · Choose an image</h2>
+
+    <div id="drop" class="drop" tabindex="0" role="button"
+         aria-label="Choose a chest X-ray image">
+      <div class="drop-idle">
+        <div class="drop-icon" aria-hidden="true">⬆</div>
+        <p class="drop-main">Tap to choose an X-ray</p>
+        <p class="drop-sub">or drag one here · PNG, JPEG, BMP · max 15 MB</p>
+      </div>
+      <img id="preview" alt="" hidden>
+    </div>
+
+    <!-- Two inputs: the plain one for files, and a capture one that opens the
+         rear camera directly on a phone. -->
+    <input id="file" type="file" accept="image/png,image/jpeg,image/bmp" hidden>
+    <input id="camera" type="file" accept="image/*" capture="environment" hidden>
+
+    <div class="row">
+      <button id="pick" class="secondary" type="button">Browse files</button>
+      <button id="shoot" class="secondary" type="button" hidden>Use camera</button>
+      <button id="clear" class="ghost" type="button" hidden>Clear</button>
+    </div>
+
+    <p id="file-name" class="muted small"></p>
+  </section>
+
+  <section class="card" id="analyse-card">
+    <h2>2 · Analyse</h2>
+    <button id="run" class="primary" type="button" disabled>Analyse image</button>
+    <p id="status" class="muted small" role="status" aria-live="polite"></p>
+  </section>
+
+  <section class="card" id="results" hidden>
+    <h2>Result</h2>
+
+    <div id="warn-ood" class="warn" hidden>
+      <strong>Low confidence.</strong>
+      The model is unsure. It has only three classes and will name one for any
+      image at all, including one that is not a chest X-ray. Treat this as
+      "no usable answer", not as a weak finding.
+    </div>
+
+    <p class="verdict">
+      <span class="verdict-label">Highest-scoring class</span>
+      <span id="verdict" class="verdict-value">—</span>
+    </p>
+
+    <div id="bars" class="bars"></div>
+
+    <p class="muted small">
+      These are softmax scores across three classes. They always sum to 100%,
+      and say nothing about how likely a patient is to have anything — the
+      training data's class balance is not real-world prevalence.
+    </p>
+  </section>
+
+  <section class="card" id="cam-card" hidden>
+    <h2>Where the model looked</h2>
+
+    <div class="row">
+      <label for="cam-class" class="muted small">Explain class</label>
+      <select id="cam-class">
+        <option value="">Predicted class</option>
+        <option value="COVID19">COVID19</option>
+        <option value="NORMAL">NORMAL</option>
+        <option value="PNEUMONIA">PNEUMONIA</option>
+      </select>
+      <button id="cam-run" class="secondary" type="button">Update</button>
+    </div>
+
+    <figure class="cam">
+      <img id="cam" alt="Grad-CAM heatmap over the uploaded X-ray">
+      <figcaption id="cam-caption" class="muted small"></figcaption>
+    </figure>
+
+    <p class="muted small">
+      Heat on a corner marker or outside the lungs means the model found a
+      shortcut. But heat <em>on</em> the lungs does not clear it — scanner and
+      exposure signature is present inside the lung fields too, so a model
+      reading provenance rather than disease still produces a plausible-looking
+      map.
+    </p>
+  </section>
+
+  <section class="card" id="about">
+    <h2>Why to distrust it</h2>
+    <ul class="reasons">
+      <li>
+        <strong>The classes are separable by source, not just by disease.</strong>
+        In the dataset this was trained on, every COVID-19 image came from
+        BIMCV, Eurorad, SIRM or GitHub, and every Normal and Pneumonia image
+        came from Kaggle. No overlap. A model can score highly by learning which
+        repository an image came from.
+      </li>
+      <li>
+        <strong>The label is not the disease.</strong> Labels came from whoever
+        assembled the dataset, by varying and mostly undocumented criteria.
+      </li>
+      <li>
+        <strong>The class balance is not prevalence.</strong> Nothing here
+        estimates how likely any given patient is to have anything.
+      </li>
+    </ul>
+    <p class="muted small">
+      Any real concern about a chest X-ray belongs with a qualified radiologist
+      or physician.
+    </p>
+  </section>
+
+  <footer class="foot">
+    <span id="health" class="pill pill-unknown">checking API…</span>
+    <span id="health-detail" class="muted small"></span>
+  </footer>
+
+</main>
+
+<dialog id="settings">
+  <form method="dialog">
+    <h2>Settings</h2>
+    <label for="api">API address</label>
+    <input id="api" type="url" inputmode="url" placeholder="http://192.168.1.5:8100">
+    <p class="muted small">
+      To use this from a phone, the API must be reachable on your network —
+      start it with <code>--host 0.0.0.0</code> and put this machine's LAN
+      address here. Images are sent only to that address.
+    </p>
+    <div class="row end">
+      <button value="cancel" class="ghost" type="submit">Cancel</button>
+      <button id="save-api" value="save" class="primary" type="submit">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>
