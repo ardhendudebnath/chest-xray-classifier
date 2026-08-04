@@ -14,11 +14,13 @@ returns is not a finding. Three specific reasons to distrust it, beyond the
 usual:
 
 - **The public COVID-19 X-ray sets are assembled from different sources per
-  class.** COVID-19 images often come from one publication's collection and the
-  normal images from another hospital entirely. A model can separate them by
-  scanner, exposure or burned-in annotation and never look at a lung. This is a
-  documented failure of published COVID-19 X-ray models, not a hypothetical.
-  Run Grad-CAM before believing any score.
+  class.** A model can separate them by scanner, exposure or burned-in
+  annotation and never look at a lung. This is not a hypothetical here, and it
+  is not a risk this repo merely warns about — it was measured. Every COVID-19
+  image in the Radiography Database comes from BIMCV, Eurorad, SIRM or GitHub;
+  every Normal and Viral Pneumonia image comes from Kaggle. Zero overlap. The
+  classes are perfectly separable by provenance before any lung is examined.
+  See [Results](#results). Run Grad-CAM before believing any score.
 - **The label is not the disease.** These labels came from whoever assembled
   the dataset, by varying and mostly undocumented criteria — some RT-PCR
   confirmed, some radiologist-read, some neither.
@@ -36,6 +38,7 @@ src/train.py         fine-tuning loop, selects on macro F1
 src/evaluate.py      per-class report and confusion matrix
 src/gradcam_utils.py heatmaps, and a CLI for one image
 src/prepare_data.py  normalise a download into data/{train,val,test}/CLASS/
+src/mask_lungs.py    mirror a split with everything outside the lungs blacked out
 src/synth_data.py    drawn stand-in images, for testing the pipeline
 app/main.py          FastAPI service: /health, /predict, /explain
 tests/               pytest suite, no dataset and no network needed
@@ -169,6 +172,60 @@ ask why the model did *not* say pneumonia.
 
 Check a handful of correct predictions before trusting a score. If the heat sits
 on a corner marker or outside the lungs, the model found a shortcut.
+
+Be aware of what this check cannot do. Scanner, exposure and processing
+signature is present *inside* the lung fields as well as around them, so a
+model reading provenance rather than pathology still produces heatmaps that
+look anatomically sensible. Heat on the lungs is necessary, not sufficient.
+
+## Results
+
+resnet18, COVID-19 Radiography Database, 15,153 images split 70/15/15 with the
+two-stage recipe above. Test set, 2,273 images:
+
+| | macro F1 | accuracy | COVID19 F1 | NORMAL F1 | PNEUMONIA F1 |
+|---|---|---|---|---|---|
+| as downloaded | 0.9816 | 0.9894 | 0.993 | 0.992 | 0.960 |
+| lungs only    | 0.9615 | 0.9718 | 0.961 | 0.979 | 0.945 |
+
+**Do not quote the first row on its own.** The classes in this dataset are
+100% separable by provenance — see [What this is not](#what-this-is-not) — so a
+high score is exactly what a model would produce by learning which repository
+an image came from.
+
+The second row is the same recipe trained on a mirror of the same split with
+every non-lung pixel zeroed. Roughly 77% of each image is removed, including all
+burned-in markers, collimation edges, soft tissue and background. The score fell
+by two points rather than collapsing. To reproduce it:
+
+```bash
+~/venvs/smt/Scripts/python.exe -m src.mask_lungs --split-root data --source ~/Downloads/COVID-19_Radiography_Dataset --out data-masked
+~/venvs/smt/Scripts/python.exe -m src.train --epochs 15 --freeze-backbone --data-dir data-masked --out checkpoints/masked_stage1.pt
+~/venvs/smt/Scripts/python.exe -m src.train --epochs 25 --lr 1e-4 --data-dir data-masked --resume checkpoints/masked_stage1.pt --out checkpoints/masked_best.pt
+~/venvs/smt/Scripts/python.exe -m src.evaluate --checkpoint checkpoints/masked_best.pt --split test --data-dir data-masked
+```
+
+It mirrors an existing split rather than re-splitting, so the two runs differ in
+exactly one variable. Masks ship with the Radiography Database; most other
+downloads have none.
+
+What that establishes, and what it does not:
+
+- It **rules out** the crude shortcut. The model is not reading annotations or
+  background, because those are gone and it still scores 0.96.
+- It **does not clear** the provenance confound. Acquisition signature survives
+  inside lung pixels, and so does the lung silhouette — a child's lungs are
+  shaped differently from an adult's, and Viral Pneumonia here is the paediatric
+  Kermany collection while COVID-19 is adult European patients.
+
+One detail argues that part of the original score *was* artifact: COVID-19 lost
+roughly twice what the other classes did (−0.032 against −0.013 and −0.015),
+and its recall fell 0.989 → 0.946. COVID-19 is the only class with unique
+provenance, so it is the class with the most artifact to lose.
+
+Nothing internal to this dataset can settle it, because the correlation is
+total by construction. That needs a COVID-19 set from different hospitals,
+where provenance no longer predicts the label.
 
 ## Serve
 
