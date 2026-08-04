@@ -45,19 +45,36 @@ def build_model(backbone=DEFAULT_BACKBONE, pretrained=True, freeze_backbone=Fals
     if backbone.startswith("resnet"):
         model = getattr(models, backbone)(weights=weights)
         model.fc = nn.Linear(model.fc.in_features, NUM_CLASSES)
-        head = model.fc
     else:
         model = models.densenet121(weights=weights)
         model.classifier = nn.Linear(model.classifier.in_features, NUM_CLASSES)
-        head = model.classifier
 
     if freeze_backbone:
-        for param in model.parameters():
-            param.requires_grad = False
-        for param in head.parameters():
-            param.requires_grad = True
+        freeze_to_head(model, backbone)
 
     return model
+
+
+def head_layer(model, backbone):
+    """The 3-class layer that replaced the ImageNet one."""
+    if backbone.startswith("resnet"):
+        return model.fc
+    if backbone == "densenet121":
+        return model.classifier
+    raise ValueError(f"No head layer defined for {backbone!r}")
+
+
+def freeze_to_head(model, backbone):
+    """Leave only the head trainable. In place.
+
+    Separate from build_model because a run started with --resume has its model
+    back from load_checkpoint rather than from build_model, and still has to be
+    able to freeze it.
+    """
+    for param in model.parameters():
+        param.requires_grad = False
+    for param in head_layer(model, backbone).parameters():
+        param.requires_grad = True
 
 
 def target_layer(model, backbone):

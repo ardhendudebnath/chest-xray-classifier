@@ -106,12 +106,22 @@ the published train/test split is pooled and redone rather than used as-is.
 ## Train
 
 ```bash
-../smart-healthcare-triage/smt/Scripts/python.exe -m src.train --epochs 15 --freeze-backbone
-../smart-healthcare-triage/smt/Scripts/python.exe -m src.train --epochs 25 --lr 1e-4
+../smart-healthcare-triage/smt/Scripts/python.exe -m src.train --epochs 15 --freeze-backbone --out checkpoints/stage1.pt
+../smart-healthcare-triage/smt/Scripts/python.exe -m src.train --epochs 25 --lr 1e-4 --resume checkpoints/stage1.pt
 ```
 
 Head first, then unfreeze. Fine-tuning a whole resnet against a few hundred
 images per class mostly memorises them.
+
+`--resume` is what joins the two, and leaving it off is the quiet way to get
+this wrong: the second command would otherwise rebuild from ImageNet weights
+and throw the first one's epochs away, which looks identical in the logs. It
+restores weights only — the optimizer and the LR schedule start clean, since
+AdamW moments gathered while the backbone was frozen say nothing about the
+parameters the second stage unfreezes.
+
+Write the stages to separate files. `--resume` refuses to run when `--out`
+names the same path, rather than consuming the checkpoint it started from.
 
 Selection is on **macro F1, not accuracy**. With COVID-19 at a tenth of the
 pneumonia count, a model that never predicts it can still post a high accuracy,
