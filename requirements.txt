@@ -1,0 +1,42 @@
+# Kept separate from backend/requirements.txt on purpose. torch and torchvision
+# are a multi-GB install and the triage backend has no reason to carry them.
+#
+# Install torch FIRST, from the index that matches your hardware, so pip does
+# not resolve a build that cannot talk to your GPU:
+#
+#   NVIDIA Blackwell (RTX 50-series), which needs CUDA 12.8 or newer:
+#     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+#
+#   Older NVIDIA cards (RTX 30/40-series):
+#     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#
+#   No NVIDIA GPU:
+#     pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#
+# Then: pip install -r requirements.txt
+#
+# The CUDA build matters more than it looks. An RTX 5070 is sm_120, and the
+# cu124 wheels carry no sm_120 kernels -- torch.cuda.is_available() still
+# returns True, and the first matmul then dies with "no kernel image is
+# available for execution on the device".
+
+torch>=2.7
+torchvision>=0.22
+
+numpy>=1.26
+pillow>=10.2
+scikit-learn>=1.4
+matplotlib>=3.8
+tqdm>=4.66
+
+# Serving
+fastapi>=0.110
+uvicorn>=0.27
+python-multipart>=0.0.9   # required for UploadFile
+
+# Tests
+pytest>=8.0
+httpx>=0.27               # required by fastapi.testclient
+
+# notebooks/ only
+jupyter>=1.0

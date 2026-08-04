@@ -1,0 +1,14 @@
+# X-ray images stay local. Public datasets are gigabytes, and even
+# de-identified medical images do not belong in a repo by reflex.
+data/*/*/
+!data/**/.gitkeep
+
+checkpoints/
+reports/
+*.pt
+*.pth
+cam*.png
+
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
