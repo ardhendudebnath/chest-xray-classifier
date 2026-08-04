@@ -107,8 +107,13 @@ the published train/test split is pooled and redone rather than used as-is.
 
 ```bash
 ../smart-healthcare-triage/smt/Scripts/python.exe -m src.train --epochs 15 --freeze-backbone --out checkpoints/stage1.pt
-../smart-healthcare-triage/smt/Scripts/python.exe -m src.train --epochs 25 --lr 1e-4 --resume checkpoints/stage1.pt
+../smart-healthcare-triage/smt/Scripts/python.exe -m src.train --epochs 25 --lr 1e-4 --resume checkpoints/stage1.pt --out checkpoints/best.pt
 ```
+
+The second stage lands on `checkpoints/best.pt`, which is where `src.evaluate`,
+`src.gradcam_utils` and the API all look by default. `--out` is spelled out
+above only because stage 1 names its own file and the asymmetry reads as though
+stage 2 goes somewhere unstated; it is the default either way.
 
 Head first, then unfreeze. Fine-tuning a whole resnet against a few hundred
 images per class mostly memorises them.
