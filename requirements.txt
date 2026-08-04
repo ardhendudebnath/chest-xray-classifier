@@ -29,6 +29,12 @@ scikit-learn>=1.4
 matplotlib>=3.8
 tqdm>=4.66
 
+# Fetching the real datasets. Needs a Kaggle account and an API token at
+# ~/.kaggle/kaggle.json -- neither dataset is redistributed here, and nothing
+# else in this file requires it. Skip it if you are only running the synthetic
+# pipeline.
+kaggle>=2.2
+
 # Serving
 fastapi>=0.110
 uvicorn>=0.27
