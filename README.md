@@ -43,25 +43,36 @@ tests/               pytest suite, no dataset and no network needed
 
 ## Setup
 
-Uses the `smt` venv belonging to the sibling `smart-healthcare-triage` checkout
+Shares one `smt` venv with the sibling `smart-healthcare-triage` checkout
 rather than standing up a second one, since torch is the same multi-gigabyte
-install either way. Install torch from the index that matches your hardware
-**first** — see the header of `requirements.txt`. On this machine (RTX 5070 Ti
-Laptop, Blackwell / sm_120) that is the CUDA 12.8 build:
+install either way. It lives **outside** both project folders, at `~/venvs/smt`.
+Both projects sit under OneDrive, and a 4.8 GB venv has no business in a synced
+folder: it rebuilds from `requirements.txt` in one command, it is thousands of
+small files that sync slowly, and it is path- and platform-specific enough that
+a synced copy would not run on another machine anyway.
+
+Install torch from the index that matches your hardware **first** — see the
+header of `requirements.txt`. On this machine (RTX 5070 Ti Laptop, Blackwell /
+sm_120) that is the CUDA 12.8 build:
 
 ```bash
-smart-healthcare-triage/smt/Scripts/python.exe -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+~/venvs/smt/Scripts/python.exe -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 ```
 
 Then the rest:
 
 ```bash
-smart-healthcare-triage/smt/Scripts/python.exe -m pip install -r chest-xray-classifier/requirements.txt
+~/venvs/smt/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
-Those two run from the directory holding both projects. Every command below
-runs from `chest-xray-classifier/`, where the same interpreter is
-`../smart-healthcare-triage/smt/Scripts/python.exe`.
+Every command below runs from `chest-xray-classifier/`. The interpreter is
+called by path rather than by activating the venv, which keeps these commands
+byte-identical in PowerShell and in bash — `~` expands in both.
+
+Always `python -m <module>`, never the bare `pytest` / `uvicorn` / `kaggle`
+launchers sitting in `Scripts/`. Those compile the interpreter's absolute path
+in at install time and broke when the venv was relocated out of OneDrive. The
+`-m` form does not care where the venv lives.
 
 ## Quick start, with no download
 
@@ -69,7 +80,7 @@ runs from `chest-xray-classifier/`, where the same interpreter is
 before committing to a several-gigabyte download:
 
 ```bash
-../smart-healthcare-triage/smt/Scripts/python.exe -m src.synth_data --out data --per-class 120
+~/venvs/smt/Scripts/python.exe -m src.synth_data --out data --per-class 120
 ```
 
 They are ellipses and Gaussian blobs with a per-class pattern drawn to be
@@ -90,7 +101,7 @@ Neither dataset is redistributed here; both need a Kaggle account.
 Unzip anywhere, then normalise it into the layout the loaders expect:
 
 ```bash
-../smart-healthcare-triage/smt/Scripts/python.exe -m src.prepare_data --source ~/Downloads/COVID-19_Radiography_Dataset --out data
+~/venvs/smt/Scripts/python.exe -m src.prepare_data --source ~/Downloads/COVID-19_Radiography_Dataset --out data
 ```
 
 `prepare_data` handles the naming differences between the two ("COVID" vs
@@ -106,8 +117,8 @@ the published train/test split is pooled and redone rather than used as-is.
 ## Train
 
 ```bash
-../smart-healthcare-triage/smt/Scripts/python.exe -m src.train --epochs 15 --freeze-backbone --out checkpoints/stage1.pt
-../smart-healthcare-triage/smt/Scripts/python.exe -m src.train --epochs 25 --lr 1e-4 --resume checkpoints/stage1.pt --out checkpoints/best.pt
+~/venvs/smt/Scripts/python.exe -m src.train --epochs 15 --freeze-backbone --out checkpoints/stage1.pt
+~/venvs/smt/Scripts/python.exe -m src.train --epochs 25 --lr 1e-4 --resume checkpoints/stage1.pt --out checkpoints/best.pt
 ```
 
 The second stage lands on `checkpoints/best.pt`, which is where `src.evaluate`,
@@ -139,7 +150,7 @@ starts crying wolf.
 ## Evaluate
 
 ```bash
-../smart-healthcare-triage/smt/Scripts/python.exe -m src.evaluate --checkpoint checkpoints/best.pt --split test
+~/venvs/smt/Scripts/python.exe -m src.evaluate --checkpoint checkpoints/best.pt --split test
 ```
 
 Read the per-class recall, not the accuracy. A model at 94% accuracy that
@@ -150,7 +161,7 @@ and only the confusion matrix shows that. Writes
 ## Grad-CAM
 
 ```bash
-../smart-healthcare-triage/smt/Scripts/python.exe -m src.gradcam_utils --checkpoint checkpoints/best.pt --image data/test/PNEUMONIA/00001_person1_virus_6.jpeg --out cam.png
+~/venvs/smt/Scripts/python.exe -m src.gradcam_utils --checkpoint checkpoints/best.pt --image data/test/PNEUMONIA/00001_person1_virus_6.jpeg --out cam.png
 ```
 
 `--class-name` explains a class other than the predicted one, which is how you
@@ -162,7 +173,7 @@ on a corner marker or outside the lungs, the model found a shortcut.
 ## Serve
 
 ```bash
-../smart-healthcare-triage/smt/Scripts/python.exe -m uvicorn app.main:app --port 8100
+~/venvs/smt/Scripts/python.exe -m uvicorn app.main:app --port 8100
 ```
 
 - `GET /health` — whether weights actually loaded, and the val metrics they
@@ -180,7 +191,7 @@ Port 8100, so it does not collide with the triage backend on 8000.
 ## Tests
 
 ```bash
-../smart-healthcare-triage/smt/Scripts/python.exe -m pytest tests -q
+~/venvs/smt/Scripts/python.exe -m pytest tests -q
 ```
 
 No dataset, no network, no pretrained download — synthetic images and untrained

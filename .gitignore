@@ -3,6 +3,13 @@
 data/*/*/
 !data/**/.gitkeep
 
+# The downloaded archives themselves. The Kaggle radiography set is 816 MB and
+# lands wherever it was unzipped from; git add -A should not be able to reach
+# for it.
+*.zip
+*.tar
+*.tar.gz
+
 checkpoints/
 reports/
 *.pt
