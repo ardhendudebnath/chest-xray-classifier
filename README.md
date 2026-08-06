@@ -44,6 +44,7 @@ src/evaluate.py      per-class report and confusion matrix
 src/ood.py           fits the "is this even a chest X-ray" check
 src/gradcam_utils.py heatmaps, and a CLI for one image
 src/prepare_data.py  normalise a download into data/{train,val,test}/CLASS/
+src/dataset_overlap.py  whether two datasets share images, before trusting one
 src/mask_lungs.py    mirror a split with everything outside the lungs blacked out
 src/synth_data.py    drawn stand-in images, for testing the pipeline
 app/main.py          FastAPI service: /health, /predict, /explain
@@ -106,6 +107,22 @@ Neither dataset is redistributed here; both need a Kaggle account.
 
 **Chest X-ray (COVID-19 & Pneumonia)** — smaller, already split.
 `kaggle datasets download -d prashant268/chest-xray-covid19-pneumonia`
+
+Before scoring one against a model trained on the other, check that they are
+actually different data — compiled Kaggle sets frequently re-package the same
+source collections, and a resized or re-encoded copy has different bytes while
+being the same radiograph:
+
+```bash
+~/venvs/smt/Scripts/python.exe -m src.dataset_overlap --left ~/Downloads/chest-xray-cp --right ~/Downloads/covid19-radiography
+```
+
+It compares contrast-normalised thumbnails, not a perceptual hash. A 64-bit
+difference hash is the usual tool and it is useless here: every chest
+radiograph shares a silhouette, so at 8x8 they collapse together, and 89% of
+*independent* normal films landed within hamming distance 5 of some COVID film.
+That fails in the direction that discards a valid experiment. See the module
+docstring for the two controls the thresholds were read off.
 
 Unzip anywhere, then normalise it into the layout the loaders expect:
 
