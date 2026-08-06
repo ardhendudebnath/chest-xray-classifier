@@ -20,7 +20,10 @@ usual:
   image in the Radiography Database comes from BIMCV, Eurorad, SIRM or GitHub;
   every Normal and Viral Pneumonia image comes from Kaggle. Zero overlap. The
   classes are perfectly separable by provenance before any lung is examined.
-  See [Results](#results). Run Grad-CAM before believing any score.
+  See [Results](#results). Run Grad-CAM before believing any score. Scoring
+  against a second download does not settle it either — that dataset turned out
+  to share 23.9% of its images with this one's training split, and the rest
+  comes from the same public archives.
 - **The label is not the disease.** These labels came from whoever assembled
   the dataset, by varying and mostly undocumented criteria — some RT-PCR
   confirmed, some radiologist-read, some neither.
@@ -37,18 +40,19 @@ Grad-CAM is included for exactly this reason. It is not decoration.
 ## Layout
 
 ```
-src/dataset.py       loaders, transforms, the two imbalance corrections
-src/model.py         backbone + 3-class head, checkpoint save/load
-src/train.py         fine-tuning loop, selects on macro F1
-src/evaluate.py      per-class report and confusion matrix
-src/ood.py           fits the "is this even a chest X-ray" check
-src/gradcam_utils.py heatmaps, and a CLI for one image
-src/prepare_data.py  normalise a download into data/{train,val,test}/CLASS/
-src/dataset_overlap.py  whether two datasets share images, before trusting one
-src/mask_lungs.py    mirror a split with everything outside the lungs blacked out
-src/synth_data.py    drawn stand-in images, for testing the pipeline
-app/main.py          FastAPI service: /health, /predict, /explain
-tests/               pytest suite, no dataset and no network needed
+src/dataset.py         loaders, transforms, the two imbalance corrections
+src/model.py           backbone + 3-class head, checkpoint save/load
+src/train.py           fine-tuning loop, selects on macro F1
+src/evaluate.py        per-class report and confusion matrix
+src/ood.py             fits the "is this even a chest X-ray" check
+src/gradcam_utils.py   heatmaps, and a CLI for one image
+src/prepare_data.py    normalise a download into data/{train,val,test}/CLASS/
+src/dataset_overlap.py whether two datasets share images, before trusting one
+src/cross_dataset.py   score a second dataset with the shared images removed
+src/mask_lungs.py      mirror a split with everything outside the lungs blacked out
+src/synth_data.py      drawn stand-in images, for testing the pipeline
+app/main.py            FastAPI service: /health, /predict, /explain
+tests/                 pytest suite, no dataset and no network needed
 ```
 
 ## Setup
@@ -258,6 +262,51 @@ Nothing internal to this dataset can settle it, because the correlation is
 total by construction. That needs a COVID-19 set from different hospitals,
 where provenance no longer predicts the label.
 
+### Scored against a second dataset
+
+The obvious next move is to score against a different download. Done naively it
+measures nothing. `prashant268/chest-xray-covid19-pneumonia` shares **23.9%** of
+its 6,432 images with this model's training split — and **zero** of them match
+by checksum, because every copy had been resized or re-encoded on the way in.
+A hash comparison reports two completely independent datasets. See
+[Real data](#real-data) for the check.
+
+So the images are partitioned first, and three numbers come out:
+
+```bash
+~/venvs/smt/Scripts/python.exe -m src.cross_dataset --dataset ~/Downloads/chest-xray-cp/Data --exclude-against ~/cxr-data-real/train
+```
+
+| | images | macro F1 | accuracy |
+|---|---|---|---|
+| all, contaminated | 6,432 | 0.9473 | 0.9633 |
+| overlapping only *(control)* | 1,537 | 0.9777 | 0.9850 |
+| **clean** | **4,895** | **0.9288** | **0.9565** |
+
+The middle row is the control and it is why the other two can be believed. Those
+are training images: the model recalls **100%** of their pneumonia cases,
+638 of 638. The clean set sits 4.9 points of macro F1 below that, so the filter
+is separating the right images. Leaving them in was worth **+0.0185** macro F1.
+
+Against 0.9816 on the held-out split of its own dataset, the clean number is
+**0.9288**. Per class, F1 goes 0.993 → 0.922 for COVID19, 0.992 → 0.886 for
+NORMAL, and 0.960 → 0.978 for PNEUMONIA. The last one rises partly because
+pneumonia is 74% of this dataset and was 9% of the other, so the per-class
+columns are not strictly like-for-like even though macro F1 absorbs most of it.
+
+Where it fails is consistent with everything else here: NORMAL precision drops
+to 0.866, with 93 pneumonia films and 35 COVID films called NORMAL. When this
+model is wrong it is disproportionately wrong in the direction of "nothing
+here".
+
+**This is still not the different-hospitals experiment.** Removing shared
+images removes image-level contamination and nothing else. Both datasets are
+compiled from the same public archives, so much of the clean 4,895 plausibly
+comes from the same collections as the training data — the same Kermany
+pneumonia set, the same BIMCV series. What this establishes is that the model
+does not collapse on unseen images from a differently-assembled download. It
+does not establish that it reads pathology rather than provenance.
+
 ## Serve
 
 ```bash
@@ -402,6 +451,22 @@ images have in common includes their provenance, so an ordinary chest X-ray from
 a hospital outside these datasets is exactly the kind of thing that scores far
 away and gets refused. The 3.5–3.9% above is measured against images from the
 same four repositories, and is a floor rather than an estimate.
+
+**How much of a floor is now measured.** On the clean images of a second
+dataset — see [Scored against a second dataset](#scored-against-a-second-dataset)
+— the refusal rate roughly doubles:
+
+| | same dataset, held out | second dataset, clean |
+|---|---|---|
+| COVID19 | 3.7% | 10.3% |
+| NORMAL | 3.9% | 1.8% |
+| PNEUMONIA | 3.5% | 8.6% |
+| pooled | 3.8% | 7.4% |
+
+A cutoff calibrated at p95 on one dataset delivers roughly p92 on another, and
+that dataset is not even from different hospitals. **The threshold does not
+travel.** Recalibrate against images from wherever it will actually be used, or
+the check quietly refuses one real film in ten while reporting one in twenty.
 
 ## Tests
 
