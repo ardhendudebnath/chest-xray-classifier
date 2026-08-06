@@ -3,6 +3,11 @@
 data/*/*/
 !data/**/.gitkeep
 
+# The same, for the sibling split directories. src.mask_lungs writes
+# data-masked/, and anything comparing two preparations writes another one
+# beside it -- none of which data/*/*/ above covers.
+data-*/
+
 # The downloaded archives themselves. The Kaggle radiography set is 816 MB and
 # lands wherever it was unzipped from; git add -A should not be able to reach
 # for it.
@@ -19,3 +24,6 @@ cam*.png
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+
+# Compiles this machine's venv path in, so it does not travel.
+.claude/launch.json

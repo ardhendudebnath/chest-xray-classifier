@@ -26,6 +26,11 @@ usual:
   confirmed, some radiologist-read, some neither.
 - **The class balance is not the real prevalence.** Nothing here estimates how
   likely a given patient is to have anything.
+- **Three classes is not every finding, and NORMAL does not mean clear.** Shown
+  600 `Lung_Opacity` films from this same dataset — real chest X-rays with a
+  finding that is not one of the three — it called them NORMAL 94.2% of the
+  time at a mean confidence of 0.972. The out-of-distribution check catches
+  only a third of them. See [Is it even a chest X-ray?](#is-it-even-a-chest-x-ray).
 
 Grad-CAM is included for exactly this reason. It is not decoration.
 
@@ -36,6 +41,7 @@ src/dataset.py       loaders, transforms, the two imbalance corrections
 src/model.py         backbone + 3-class head, checkpoint save/load
 src/train.py         fine-tuning loop, selects on macro F1
 src/evaluate.py      per-class report and confusion matrix
+src/ood.py           fits the "is this even a chest X-ray" check
 src/gradcam_utils.py heatmaps, and a CLI for one image
 src/prepare_data.py  normalise a download into data/{train,val,test}/CLASS/
 src/mask_lungs.py    mirror a split with everything outside the lungs blacked out
@@ -161,6 +167,14 @@ recalls 60% of COVID-19 cases is useless for the thing you would want it for,
 and only the confusion matrix shows that. Writes
 `reports/confusion_test.png` and `reports/metrics_test.json`.
 
+Then fit the out-of-distribution check, which the API needs before it can tell
+whether an upload is a chest X-ray at all — see
+[Is it even a chest X-ray?](#is-it-even-a-chest-x-ray):
+
+```bash
+~/venvs/smt/Scripts/python.exe -m src.ood --checkpoint checkpoints/best.pt --out checkpoints/ood.pt
+```
+
 ## Grad-CAM
 
 ```bash
@@ -235,10 +249,19 @@ where provenance no longer predicts the label.
 
 - `GET /health` — whether weights actually loaded, and the val metrics they
   scored. Starts and reports `no_model` rather than crash-looping when there is
-  no checkpoint.
+  no checkpoint. `ood_stats_loaded` says whether the out-of-distribution check
+  is running at all.
 - `POST /predict` — multipart `file`. Returns the ranked distribution, plus
-  `low_confidence`, which is the only signal a caller gets that the image was
-  out of distribution — a 3-class softmax names a class for a photo of a cat.
+  `out_of_distribution` with the `ood_score` and the `ood_threshold` actually
+  applied. `low_confidence` is still there and is still only a weak hint: it
+  catches the model being torn between its three classes, which is a much
+  narrower failure than being handed something that is not a chest X-ray.
+
+  `out_of_distribution` is `null` when no statistics are loaded — meaning the
+  check did not run, **not** that the image passed. The API reads them from
+  `CXR_OOD_STATS` (default `checkpoints/ood.pt`) and refuses any set fitted
+  against a different checkpoint, since those measure distances from the wrong
+  means and would otherwise look fine.
 - `POST /explain` — multipart `file`, optional `class_name`. Returns the overlay
   PNG. `X-Prediction` is what the model called it; `X-Explained-Class` is what
   the heatmap answers for. They differ whenever `class_name` is passed.
@@ -272,7 +295,7 @@ screen and it runs without browser chrome. Note that the service worker only
 registers over HTTPS or on localhost, so over plain LAN HTTP the page works but
 is not available offline.
 
-Three deliberate choices in the UI:
+Four deliberate choices in the UI:
 
 - **The classes are not colour-coded.** COVID19 is not red and NORMAL is not
   green; every probability bar is the same colour and ranks by length alone. A
@@ -282,20 +305,86 @@ Three deliberate choices in the UI:
 - **Prediction and explanation are reported separately** whenever a class is
   requested, because they come apart: the map answers "why not pneumonia?"
   while the model's own call is still something else.
+- **"Not a chest X-ray" and "low confidence" are separate notices, and the
+  first outranks the second.** One says the scores below are unreliable, the
+  other says there is nothing below worth reading. A third notice appears when
+  no statistics are loaded, because an unchecked image must not look like one
+  that passed.
 
-### The out-of-distribution warning does not work
+## Is it even a chest X-ray?
 
-`/predict` returns `low_confidence` when the top score is under 0.6, described
-in `app/main.py` as the only signal a caller gets that the image was out of
-distribution. It does not do that job. A flat grey square, uploaded through this
-frontend, is classified **COVID19 at 100.0% with no warning shown**.
+`low_confidence` was documented here as the signal that an image was out of
+distribution. It never did that job. Softmax over three classes normalises
+whatever it is handed, so an image unlike anything in training does not come
+back uncertain — it comes back wrong and certain. Measured against
+`checkpoints/best.pt`:
 
-That is not a threshold that needs tuning. Softmax over three classes is
-confidently wrong on inputs unlike anything in training, and no cutoff on it
-separates "a chest X-ray it is sure about" from "not a chest X-ray at all".
-Detecting that needs something else entirely — an explicit reject class trained
-on non-X-ray images, or a distance-based score over the features rather than the
-logits. Until then, treat `low_confidence` as a weak hint and not a guard.
+| input | prediction | `low_confidence` |
+|---|---|---|
+| flat grey square | COVID19 100.00% | not flagged |
+| flat black square | COVID19 100.00% | not flagged |
+| flat white square | COVID19 99.67% | not flagged |
+| uniform noise | COVID19 99.96% | not flagged |
+| smooth colour photo | COVID19 100.00% | not flagged |
+| a page of text | COVID19 99.86% | not flagged |
+
+No cutoff on that column separates "a chest X-ray it is sure about" from "not a
+chest X-ray at all", because there is no uncertainty in it to threshold.
+
+`src/ood.py` measures a different thing. The logits are three numbers that have
+already discarded everything except how much the image resembles each class; the
+512-number feature vector feeding them still carries whether it resembled
+anything. So: fit a Gaussian per class over the training features, take the
+Mahalanobis distance to the nearest one, and refuse anything far enough out.
+This is the standard construction, from Lee et al. 2018.
+
+```bash
+~/venvs/smt/Scripts/python.exe -m src.ood --checkpoint checkpoints/best.pt --out checkpoints/ood.pt
+```
+
+Fit on `train`, cutoffs calibrated on `val`, both with augmentation off. Every
+one of the six inputs above is now refused, by a wide margin — they score 2,733
+to 7,384 against cutoffs between 713 and 1,467.
+
+**The cutoff is per class, and that is not a detail.** A single pooled cutoff at
+the 95th percentile reported a reassuring 4.5% false-reject rate while actually
+refusing 30.2% of real pneumonia films and 0.4% of normal ones — the pooled
+number was set by NORMAL, which is two thirds of the split. It is the same trap
+as reading accuracy instead of per-class recall, one level down. Calibrated per
+class and applied by whichever class an image is nearest, on the held-out test
+split:
+
+| | cutoff | real X-rays refused |
+|---|---|---|
+| COVID19 | 1054.5 | 3.7% (20/542) |
+| NORMAL | 712.8 | 3.9% (60/1529) |
+| PNEUMONIA | 1467.3 | 3.5% (7/202) |
+
+`--percentile` is the knob, and it has a cost on both sides: the default 95
+spends about one real X-ray in twenty to catch the inputs above.
+
+### What this does not do
+
+It answers "unlike the training images". That is **not** the same as "not a
+chest X-ray", and much further still from "the model cannot handle this".
+
+The dataset makes the gap easy to measure. `Lung_Opacity` ships in the same
+download and is excluded from training as a broader finding than pneumonia —
+real chest X-rays, same repositories, showing something this model has no class
+for. Of 600 of them, only 34.5% are refused. The rest are accepted and then
+called **NORMAL 94.2% of the time, at a mean confidence of 0.972**.
+
+That is the more dangerous failure, and this check does not catch it. A caller
+gets "looks like a chest X-ray" and "NORMAL", about a film with a real opacity
+on it. Nothing here can fix that, because a three-class head has no output for
+it: NORMAL means "not the other two", never "clear". Catching it needs classes
+for the findings you care about, or a model that can abstain by design.
+
+There is also the confound running through the whole project. What the training
+images have in common includes their provenance, so an ordinary chest X-ray from
+a hospital outside these datasets is exactly the kind of thing that scores far
+away and gets refused. The 3.5–3.9% above is measured against images from the
+same four repositories, and is a floor rather than an estimate.
 
 ## Tests
 

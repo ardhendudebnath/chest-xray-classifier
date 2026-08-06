@@ -75,11 +75,30 @@
   <section class="card" id="results" hidden>
     <h2>Result</h2>
 
-    <div id="warn-ood" class="warn" hidden>
+    <!-- The strong one. This fires on a distance measured in the model's own
+         feature space, not on the confidence, because the confidence is high
+         for images that are not chest X-rays at all. -->
+    <div id="warn-ood" class="warn warn-stop" hidden>
+      <strong>This does not look like a chest X-ray.</strong>
+      It sits far outside everything the model was trained on, so the scores
+      below are not an answer about this image. They are what a three-class
+      softmax returns when it is handed something it has no class for, and it
+      returns them just as confidently as it would for a real film.
+    </div>
+
+    <!-- The weak one, and labelled as weak. It only catches the model being -->
+    <!-- visibly torn, which is a different and much rarer failure. -->
+    <div id="warn-lowconf" class="warn" hidden>
       <strong>Low confidence.</strong>
-      The model is unsure. It has only three classes and will name one for any
-      image at all, including one that is not a chest X-ray. Treat this as
-      "no usable answer", not as a weak finding.
+      The model is split between classes here. That is a weak hint on its own —
+      it is not the check for whether this is a chest X-ray, which is reported
+      separately above.
+    </div>
+
+    <div id="warn-nocheck" class="warn" hidden>
+      <strong>The out-of-distribution check did not run.</strong>
+      No fitted statistics were loaded, so nothing below has been tested for
+      whether it is a chest X-ray at all. This is not a pass.
     </div>
 
     <p class="verdict">
@@ -141,6 +160,13 @@
       <li>
         <strong>The class balance is not prevalence.</strong> Nothing here
         estimates how likely any given patient is to have anything.
+      </li>
+      <li>
+        <strong>Three classes is not every finding.</strong> The check above
+        catches images that are not chest X-rays. It does not catch a real
+        chest X-ray showing something this model has no class for — tested on
+        lung opacity films, most were accepted and then called NORMAL at high
+        confidence. "NORMAL" here means "not the other two", never "clear".
       </li>
     </ul>
     <p class="muted small">

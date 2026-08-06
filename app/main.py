@@ -8,6 +8,12 @@ This is a research model trained on public data; it is not a diagnostic device
 and nothing it returns should be treated as a clinical finding. Sending the
 number back without that context is how a demo turns into someone's decision.
 
+/predict also reports whether the image resembles anything the model was
+trained on, which the probabilities cannot say for themselves -- a three-class
+softmax answers confidently no matter what it is handed. That check needs
+statistics fitted by src.ood; without them the field is null, meaning the
+question was not asked rather than answered in the negative.
+
     uvicorn app.main:app --port 8100 --reload
 """
 
@@ -23,9 +29,11 @@ from PIL import Image, UnidentifiedImageError
 
 from src.dataset import CLASSES, build_transforms
 from src.gradcam_utils import explain_image
-from src.model import load_checkpoint, pick_device
+from src.model import forward_with_features, load_checkpoint, pick_device
+from src.ood import DEFAULT_STATS_PATH, is_out_of_distribution, load_stats, score
 
 CHECKPOINT_PATH = os.getenv("CXR_CHECKPOINT", "checkpoints/best.pt")
+OOD_STATS_PATH = os.getenv("CXR_OOD_STATS", DEFAULT_STATS_PATH)
 
 # 15 MB. Chest X-ray PNGs run a few hundred KB after downscaling; anything past
 # this is either a mistake or someone probing the endpoint.
@@ -39,7 +47,35 @@ DISCLAIMER = (
 
 # Populated by the lifespan handler so the weights load once at startup rather
 # than on the first request.
-state = {"model": None, "backbone": None, "device": None, "checkpoint": None}
+state = {
+    "model": None,
+    "backbone": None,
+    "device": None,
+    "checkpoint": None,
+    "ood": None,
+}
+
+
+def _load_ood_stats(model):
+    """The out-of-distribution statistics, or None with a reason printed.
+
+    Missing statistics are not fatal -- the classifier still works without
+    them -- but they are never silently substituted for. Every path that finds
+    nothing usable leaves this None, and /predict then reports the check as
+    unavailable rather than as passed.
+    """
+    try:
+        return load_stats(OOD_STATS_PATH, model)
+    except FileNotFoundError:
+        print(
+            f"no OOD stats at {OOD_STATS_PATH} -- /predict cannot tell whether "
+            f"an image is a chest X-ray. Fit them with python -m src.ood"
+        )
+    except ValueError as error:
+        # A mismatch means the stats describe a different feature space, so the
+        # distances would be meaningless. Refusing them is the point.
+        print(f"ignoring OOD stats at {OOD_STATS_PATH}: {error}")
+    return None
 
 
 @asynccontextmanager
@@ -59,8 +95,11 @@ async def lifespan(app):
         backbone=checkpoint["backbone"],
         device=device,
         checkpoint=checkpoint,
+        ood=_load_ood_stats(model),
     )
     print(f"loaded {CHECKPOINT_PATH} ({checkpoint['backbone']}) on {device}")
+    if state["ood"] is not None:
+        print(f"loaded OOD stats from {OOD_STATS_PATH}")
     yield
 
 
@@ -116,9 +155,35 @@ async def _read_image(upload):
         )
 
 
+def _ood_fields(features):
+    """Whether the image looks like anything the model was trained on.
+
+    All three are null when no statistics are loaded. Null means the check did
+    not run -- it is not a pass, and a caller that treats it as one has the
+    same bug this endpoint used to have.
+    """
+    stats = state["ood"]
+    if stats is None:
+        return {
+            "out_of_distribution": None,
+            "ood_score": None,
+            "ood_threshold": None,
+        }
+
+    scores, nearest = score(features.cpu().numpy(), stats)
+    return {
+        "out_of_distribution": bool(is_out_of_distribution(scores, nearest, stats)[0]),
+        "ood_score": round(float(scores[0]), 1),
+        # The cutoff actually applied, which is the one for the class this
+        # image is nearest to rather than a single global number.
+        "ood_threshold": round(float(stats["thresholds"][int(nearest[0])]), 1),
+    }
+
+
 @app.get("/health")
 def health():
     loaded = state["model"] is not None
+    stats = state["ood"]
     return {
         "status": "ok" if loaded else "no_model",
         "checkpoint": CHECKPOINT_PATH,
@@ -127,6 +192,12 @@ def health():
         "device": str(state["device"]) if state["device"] else None,
         "classes": CLASSES,
         "val_metrics": state["checkpoint"]["metrics"] if loaded else None,
+        # Reported separately from the model, because the service runs happily
+        # without these and a caller has no other way to find out that every
+        # out_of_distribution field it is reading back is null.
+        "ood_stats": OOD_STATS_PATH,
+        "ood_stats_loaded": stats is not None,
+        "ood_percentile": stats["percentile"] if stats else None,
     }
 
 
@@ -138,8 +209,13 @@ async def predict(file: UploadFile = File(...)):
     tensor = build_transforms(train=False)(image.convert("L"))
     tensor = tensor.unsqueeze(0).to(state["device"])
 
+    # One pass for both answers: the probabilities come off the logits, the
+    # distance off the features feeding the head.
     with torch.no_grad():
-        probabilities = torch.softmax(state["model"](tensor), dim=1)[0].cpu()
+        logits, features = forward_with_features(
+            state["model"], state["backbone"], tensor
+        )
+    probabilities = torch.softmax(logits, dim=1)[0].cpu()
 
     ranked = sorted(
         zip(CLASSES, probabilities.tolist()), key=lambda pair: pair[1], reverse=True
@@ -150,10 +226,12 @@ async def predict(file: UploadFile = File(...)):
         "prediction": label,
         "confidence": round(confidence, 4),
         "probabilities": {name: round(value, 4) for name, value in ranked},
-        # A 3-class softmax always sums to 1, so it will name a class even for
-        # a photo of a cat. Low confidence is the only signal the caller has
-        # that the image was out of distribution.
+        # A 3-class softmax always sums to 1, so it names a class for any image
+        # at all. This flag catches only the case where it is visibly torn
+        # between the three; it does not catch a confident answer to a question
+        # that was never asked, which is what out_of_distribution is for.
         "low_confidence": confidence < 0.6,
+        **_ood_fields(features),
         "disclaimer": DISCLAIMER,
     }
 

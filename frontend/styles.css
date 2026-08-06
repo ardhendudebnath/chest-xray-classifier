@@ -148,6 +148,15 @@ h2 { font-size: .95rem; margin: 0 0 var(--s3); letter-spacing: -.01em; }
 }
 .warn strong { color: var(--warn); }
 
+/* "This is not a chest X-ray" outranks "the model is unsure": one says the
+ * answer below is unreliable, the other says there is no answer below. It gets
+ * the stop colour so the two do not read as the same severity when both show. */
+.warn-stop {
+  background: var(--stop-tint);
+  border-left-color: var(--stop);
+}
+.warn-stop strong { color: var(--stop); }
+
 /* ------------------------------------------------------------------ upload */
 
 .drop {

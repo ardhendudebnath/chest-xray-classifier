@@ -20,7 +20,8 @@ const els = {
   drop: $('drop'), preview: $('preview'), file: $('file'), camera: $('camera'),
   pick: $('pick'), shoot: $('shoot'), clear: $('clear'), fileName: $('file-name'),
   run: $('run'), status: $('status'),
-  results: $('results'), verdict: $('verdict'), bars: $('bars'), warnOod: $('warn-ood'),
+  results: $('results'), verdict: $('verdict'), bars: $('bars'),
+  warnOod: $('warn-ood'), warnLowConf: $('warn-lowconf'), warnNoCheck: $('warn-nocheck'),
   camCard: $('cam-card'), cam: $('cam'), camClass: $('cam-class'),
   camRun: $('cam-run'), camCaption: $('cam-caption'),
   health: $('health'), healthDetail: $('health-detail'),
@@ -153,7 +154,19 @@ function describeNetworkError(error) {
 function renderPrediction(data) {
   els.results.hidden = false;
   els.verdict.textContent = data.prediction;
-  els.warnOod.hidden = !data.low_confidence;
+
+  /* Three distinct states, and the null one is not the negative one.
+   * `out_of_distribution === null` means the service had no fitted statistics
+   * and never ran the check; showing nothing there would let an untested image
+   * look like one that passed. Compared with === true and === false so that a
+   * null never falls through into either branch. */
+  els.warnOod.hidden = data.out_of_distribution !== true;
+  els.warnNoCheck.hidden = data.out_of_distribution !== null
+    && data.out_of_distribution !== undefined;
+
+  /* Only worth showing when the stronger warning is not already up, otherwise
+   * two boxes say overlapping things about the same image. */
+  els.warnLowConf.hidden = !data.low_confidence || data.out_of_distribution === true;
 
   const entries = CLASSES
     .map((name) => [name, data.probabilities[name] ?? 0])
@@ -222,9 +235,18 @@ async function checkHealth() {
       els.health.textContent = `API ready · ${data.backbone} on ${data.device}`;
       els.health.className = 'pill pill-ok';
       const f1 = data.val_metrics && data.val_metrics.macro_f1;
-      els.healthDetail.textContent = f1
-        ? `validation macro F1 ${f1.toFixed(4)} — on data whose classes are separable by source`
-        : '';
+      const notes = [];
+      if (f1) {
+        notes.push(`validation macro F1 ${f1.toFixed(4)} — on data whose ` +
+                   `classes are separable by source`);
+      }
+      /* Worth saying before an upload rather than after. Without these the
+       * service answers every image, including the ones it should refuse. */
+      if (!data.ood_stats_loaded) {
+        notes.push('no out-of-distribution statistics loaded — nothing is ' +
+                   'checked for being a chest X-ray');
+      }
+      els.healthDetail.textContent = notes.join(' · ');
     } else {
       els.health.textContent = 'API up, no model loaded';
       els.health.className = 'pill pill-bad';

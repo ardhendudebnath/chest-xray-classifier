@@ -4,19 +4,28 @@ import importlib
 import io
 
 import pytest
+import torch
 from fastapi.testclient import TestClient
 from PIL import Image
 
 from src.dataset import CLASSES
 
 
-def load_app(monkeypatch, checkpoint_path):
-    """Re-import app.main so it picks up CXR_CHECKPOINT from the environment.
+def load_app(monkeypatch, checkpoint_path, ood_path=None):
+    """Re-import app.main so it picks up its paths from the environment.
 
-    The path is read at import time into a module constant, so setting the
-    variable after the first import would have no effect.
+    Both are read at import time into module constants, so setting the
+    variables after the first import would have no effect.
+
+    ood_path defaults to somewhere that does not exist, rather than to the
+    module default: that default is `checkpoints/ood.pt`, which is a real file
+    in a working checkout, and letting it load would make these tests depend on
+    whether someone had run src.ood.
     """
     monkeypatch.setenv("CXR_CHECKPOINT", str(checkpoint_path))
+    monkeypatch.setenv(
+        "CXR_OOD_STATS", str(ood_path or checkpoint_path.parent / "no-such-ood.pt")
+    )
     import app.main
 
     return importlib.reload(app.main)
@@ -24,7 +33,57 @@ def load_app(monkeypatch, checkpoint_path):
 
 @pytest.fixture
 def client(monkeypatch, checkpoint):
+    """No OOD statistics. The classifier still serves; the check reports null."""
     module = load_app(monkeypatch, checkpoint)
+    with TestClient(module.app) as test_client:
+        yield test_client
+
+
+def write_stats(path, checkpoint_path, thresholds):
+    """Stats for this checkpoint with the cutoffs pinned to chosen values.
+
+    Real fitted cutoffs would make these tests depend on what untrained weights
+    happen to do to synthetic images. What is under test here is that the
+    verdict reaches the caller, so the verdict is made deterministic: 0.0
+    flags everything, a huge number flags nothing.
+    """
+    import numpy as np
+
+    from src.dataset import CLASSES
+    from src.model import fingerprint_state_dict, load_checkpoint
+    from src.ood import save_stats
+
+    model, _ = load_checkpoint(checkpoint_path, "cpu")
+    dimension = model.fc.in_features
+
+    return save_stats(
+        path,
+        {
+            "means": torch.zeros(len(CLASSES), dimension, dtype=torch.float64),
+            "precision": torch.from_numpy(np.eye(dimension)),
+            "classes": list(CLASSES),
+            "backbone": "resnet18",
+            "feature_dim": dimension,
+            "shrinkage": 0.5,
+            "fingerprint": fingerprint_state_dict(model.state_dict()),
+            "thresholds": list(thresholds),
+            "percentile": 95.0,
+        },
+    )
+
+
+@pytest.fixture
+def client_in_distribution(monkeypatch, checkpoint, tmp_path):
+    path = write_stats(tmp_path / "pass.pt", checkpoint, [1e12] * 3)
+    module = load_app(monkeypatch, checkpoint, path)
+    with TestClient(module.app) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def client_rejects_everything(monkeypatch, checkpoint, tmp_path):
+    path = write_stats(tmp_path / "reject.pt", checkpoint, [0.0] * 3)
+    module = load_app(monkeypatch, checkpoint, path)
     with TestClient(module.app) as test_client:
         yield test_client
 
@@ -33,6 +92,17 @@ def client(monkeypatch, checkpoint):
 def png_bytes(xray_image):
     path, _ = xray_image
     return path.read_bytes()
+
+
+def synthetic_png():
+    """One drawn stand-in X-ray as PNG bytes, for tests without the fixture."""
+    import numpy as np
+
+    from src.synth_data import _render
+
+    buffer = io.BytesIO()
+    _render("NORMAL", np.random.default_rng(3)).save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 def test_health_reports_a_loaded_model(client):
@@ -74,13 +144,79 @@ def test_predict_returns_a_ranked_distribution(client, png_bytes):
 
 
 def test_predict_flags_low_confidence(client, png_bytes):
-    """An untrained model is near-uniform, which is exactly the case the flag
-    exists for: a 3-class softmax names a class even for a photo of a cat."""
+    """Catches the model being visibly torn between its three classes. That is
+    a much narrower thing than "this is not a chest X-ray", which is why it is
+    no longer the only signal a caller gets."""
     body = client.post(
         "/predict", files={"file": ("xray.png", png_bytes, "image/png")}
     ).json()
 
     assert body["low_confidence"] == (body["confidence"] < 0.6)
+
+
+def test_no_ood_stats_reports_null_rather_than_a_pass(client, png_bytes):
+    """The distinction the whole field turns on. Null means the check did not
+    run; False would mean it ran and the image passed. Collapsing the two is
+    how an unchecked image comes to look like a checked one."""
+    body = client.post(
+        "/predict", files={"file": ("xray.png", png_bytes, "image/png")}
+    ).json()
+
+    assert body["out_of_distribution"] is None
+    assert body["ood_score"] is None
+    assert body["ood_threshold"] is None
+    assert client.get("/health").json()["ood_stats_loaded"] is False
+
+
+def test_predict_reports_an_image_inside_the_distribution(
+    client_in_distribution, png_bytes
+):
+    body = client_in_distribution.post(
+        "/predict", files={"file": ("xray.png", png_bytes, "image/png")}
+    ).json()
+
+    assert body["out_of_distribution"] is False
+    assert body["ood_score"] >= 0
+    assert body["ood_threshold"] == pytest.approx(1e12)
+    assert client_in_distribution.get("/health").json()["ood_stats_loaded"] is True
+
+
+def test_predict_reports_an_image_outside_it(client_rejects_everything, png_bytes):
+    """The case the endpoint used to get wrong: a confident answer, and a
+    caller told nothing about the image being unlike anything trained on."""
+    body = client_rejects_everything.post(
+        "/predict", files={"file": ("xray.png", png_bytes, "image/png")}
+    ).json()
+
+    assert body["out_of_distribution"] is True
+    assert body["ood_score"] > body["ood_threshold"]
+    # Still a full prediction. The flag qualifies the answer, it does not
+    # replace it -- a caller that ignores the flag sees what it always saw.
+    assert body["prediction"] in CLASSES
+
+
+def test_stats_for_another_checkpoint_are_ignored_not_trusted(
+    monkeypatch, checkpoint, tmp_path
+):
+    """A mismatch has to degrade to "not checked", never to "checked, fine"."""
+    from src.model import build_model, save_checkpoint
+
+    other_path = tmp_path / "other.pt"
+    torch.manual_seed(123)
+    save_checkpoint(
+        other_path, build_model("resnet18", pretrained=False), "resnet18", 1, {}
+    )
+    stats_path = write_stats(tmp_path / "mismatched.pt", other_path, [0.0] * 3)
+
+    module = load_app(monkeypatch, checkpoint, stats_path)
+    with TestClient(module.app) as test_client:
+        assert test_client.get("/health").json()["ood_stats_loaded"] is False
+
+        body = test_client.post(
+            "/predict", files={"file": ("x.png", synthetic_png(), "image/png")}
+        ).json()
+
+        assert body["out_of_distribution"] is None
 
 
 def test_a_jpeg_is_accepted_too(client, xray_image):

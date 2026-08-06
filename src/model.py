@@ -11,6 +11,7 @@ and a class list that drifts between training and serving relabels every
 prediction without raising anything.
 """
 
+import hashlib
 from pathlib import Path
 
 import torch
@@ -89,6 +90,60 @@ def target_layer(model, backbone):
     if backbone == "densenet121":
         return model.features.denseblock4
     raise ValueError(f"No Grad-CAM target layer defined for {backbone!r}")
+
+
+def forward_with_features(model, backbone, batch):
+    """Returns (logits, penultimate features) from a single forward pass.
+
+    The features are whatever the 3-class head is handed -- 512 numbers for
+    resnet18, 2048 for resnet50, 1024 for densenet121 -- read off with a forward
+    hook on the head itself. Hooking the head rather than naming a layer per
+    backbone means this keeps working for any of the three: torchvision pools
+    and flattens before the head in every case, so its input is always (N, D).
+
+    This is the representation src.ood measures distances in. The logits are
+    three numbers that have already thrown away everything except how much the
+    image looks like each class; the features still carry whether it looked like
+    anything at all. Both come out of one pass because /predict needs the
+    probabilities and the distance for the same image, and running the model
+    twice to get them would double the cost of every request.
+    """
+    captured = {}
+
+    def capture(module, inputs, output):
+        captured["features"] = inputs[0].detach()
+
+    handle = head_layer(model, backbone).register_forward_hook(capture)
+    try:
+        logits = model(batch)
+    finally:
+        # Always, including when the forward pass raises. A leaked hook holds
+        # onto activations for the lifetime of the model.
+        handle.remove()
+
+    if "features" not in captured:
+        raise RuntimeError(
+            f"The {backbone} head never ran, so no features were captured."
+        )
+    return logits, captured["features"]
+
+
+def fingerprint_state_dict(state_dict):
+    """A short stable hash of the weights, for pairing artefacts to a model.
+
+    src.ood fits its statistics in one particular feature space. Point those
+    statistics at a different checkpoint and every distance is measured against
+    the wrong means, which does not raise anything -- it just quietly returns
+    numbers that mean nothing. Comparing fingerprints turns that into an error.
+
+    Computed from the live state dict rather than stored inside the checkpoint,
+    so it also works for checkpoints written before this existed.
+    """
+    digest = hashlib.sha256()
+    for key in sorted(state_dict):
+        digest.update(key.encode("utf-8"))
+        digest.update(state_dict[key].detach().cpu().contiguous().numpy().tobytes())
+    return digest.hexdigest()[:16]
 
 
 def save_checkpoint(path, model, backbone, epoch, metrics):
