@@ -57,7 +57,7 @@ def label_of(path):
     Read from the path rather than a manifest because these downloads arrive
     as one directory per class, but at different depths -- Data/train/NORMAL/
     here, NORMAL/images/ elsewhere. Returns None when no part names a class,
-    which is how directories outside the three classes get dropped.
+    which is how directories outside the four classes get dropped.
     """
     for part in reversed(path.parts[:-1]):
         if part in CLASSES:

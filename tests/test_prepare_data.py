@@ -24,7 +24,8 @@ from src.synth_data import _render
         ("Normal", "NORMAL"),
         ("Viral Pneumonia", "PNEUMONIA"),
         ("PNEUMONIA", "PNEUMONIA"),
-        ("Lung_Opacity", None),
+        ("Lung_Opacity", "LUNG_OPACITY"),
+        ("lung opacity", "LUNG_OPACITY"),
         ("Tuberculosis", None),
         ("masks", None),
     ],
@@ -72,6 +73,7 @@ def test_images_nested_under_an_images_subdir_are_found(tmp_path):
             "COVID/images": ["COVID-1.png", "COVID-2.png"],
             "Normal/images": ["Normal-1.png"],
             "Viral Pneumonia/images": ["Viral Pneumonia-1.png"],
+            "Lung_Opacity/images": ["Lung_Opacity-1.png"],
         },
     )
 
@@ -106,12 +108,17 @@ def test_unmapped_directories_are_reported_not_silently_dropped(tmp_path):
             "Normal": ["b.png"],
             "PNEUMONIA": ["c.png"],
             "Lung_Opacity": ["d.png"],
+            "Tuberculosis": ["e.png"],
         },
     )
 
     found, ignored = find_class_dirs(source)
-    assert "Lung_Opacity" not in found
-    assert "Lung_Opacity" in ignored
+
+    # Lung opacity is one of ours now; tuberculosis still is not, and has to be
+    # named rather than dropped in silence.
+    assert found["LUNG_OPACITY"]
+    assert "Tuberculosis" in ignored
+    assert "Lung_Opacity" not in ignored
 
 
 def test_one_patient_never_lands_in_two_splits(tmp_path):

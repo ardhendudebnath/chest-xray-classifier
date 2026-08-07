@@ -144,7 +144,7 @@ def test_predict_returns_a_ranked_distribution(client, png_bytes):
 
 
 def test_predict_flags_low_confidence(client, png_bytes):
-    """Catches the model being visibly torn between its three classes. That is
+    """Catches the model being visibly torn between its four classes. That is
     a much narrower thing than "this is not a chest X-ray", which is why it is
     no longer the only signal a caller gets."""
     body = client.post(

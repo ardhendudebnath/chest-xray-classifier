@@ -25,7 +25,7 @@ from src.synth_data import _render  # noqa: E402
 
 # Uneven on purpose: the sampler and the class weights are what these counts
 # exist to exercise.
-COUNTS = {"COVID19": 4, "NORMAL": 6, "PNEUMONIA": 10}
+COUNTS = {"COVID19": 4, "LUNG_OPACITY": 7, "NORMAL": 6, "PNEUMONIA": 10}
 
 
 def write_split(directory, counts, rng):
@@ -38,7 +38,7 @@ def write_split(directory, counts, rng):
 
 @pytest.fixture(scope="session")
 def data_root(tmp_path_factory):
-    """A dataset directory with all three splits and all three classes."""
+    """A dataset directory with all three splits and all four classes."""
     root = tmp_path_factory.mktemp("data")
     rng = np.random.default_rng(0)
 

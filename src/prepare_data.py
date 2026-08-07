@@ -19,10 +19,14 @@ in one split. Where a filename carries no patient id, each image is its own
 group, which is the correct assumption for the COVID-19 Radiography Database.
 
 **Class aliasing.** "COVID", "COVID-19" and "COVID19" are the same class;
-"Viral Pneumonia" and "PNEUMONIA" are the same class. Lung_Opacity, which ships
-inside the Radiography Database, is *not* one of ours and is skipped rather
-than folded into pneumonia -- it is a broader finding and quietly merging it
-would change what the model claims to detect.
+"Viral Pneumonia" and "PNEUMONIA" are the same class. Lung_Opacity is mapped to
+LUNG_OPACITY and is *not* folded into pneumonia -- it is a broader finding, and
+merging them would change what the model claims to detect.
+
+Not every download has all four. The Radiography Database does; the smaller
+Kermany-derived sets have no lung opacity directory at all, so they cannot
+train this model and the run stops rather than quietly producing a split with
+one class missing -- which ImageFolder would renumber the rest around.
 
     python -m src.prepare_data --source ~/Downloads/COVID-19_Radiography_Dataset
 """
@@ -37,11 +41,12 @@ from pathlib import Path
 
 from src.dataset import CLASSES
 
-# Lowercased directory names that map onto each of our three classes. Matching
+# Lowercased directory names that map onto each of our four classes. Matching
 # is done on the whole directory name, not a substring, so "Non-COVID" cannot
 # fall through into COVID19.
 CLASS_ALIASES = {
     "COVID19": {"covid", "covid19", "covid-19", "covid_19", "covid19_cases"},
+    "LUNG_OPACITY": {"lung_opacity", "lung opacity", "lung-opacity", "opacity"},
     "NORMAL": {"normal", "normal_cases", "healthy"},
     "PNEUMONIA": {
         "pneumonia",
@@ -54,8 +59,8 @@ CLASS_ALIASES = {
 }
 
 # Present in some downloads and deliberately not mapped. Named here so the
-# script can say "skipping Lung_Opacity" instead of "found nothing".
-KNOWN_IGNORED = {"lung_opacity", "lung opacity", "masks", "tuberculosis"}
+# script can say "skipping tuberculosis" instead of "found nothing".
+KNOWN_IGNORED = {"masks", "tuberculosis", "lung_masks"}
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 
@@ -235,7 +240,9 @@ def main():
             f"Directories matched: "
             f"{ {k: [str(d) for d in v] for k, v in class_dirs.items()} }\n"
             "Check you unzipped the whole download, and see CLASS_ALIASES in "
-            "this file if your copy uses different directory names."
+            "this file if your copy uses different directory names.\n"
+            "Not every public set has all four classes -- the Kermany-derived "
+            "ones carry no lung opacity images, and cannot train this model."
         )
 
     rng = random.Random(args.seed)

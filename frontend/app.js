@@ -11,7 +11,11 @@
 
 'use strict';
 
-const CLASSES = ['COVID19', 'NORMAL', 'PNEUMONIA'];
+/* Must match src/dataset.py CLASSES, in the same order. /health returns the
+ * server's list, and checkHealth replaces this with it -- these values are only
+ * the fallback for the moments before that lands, and a mismatch between the
+ * two would mislabel every bar. */
+let CLASSES = ['COVID19', 'LUNG_OPACITY', 'NORMAL', 'PNEUMONIA'];
 const MAX_BYTES = 15 * 1024 * 1024;
 
 const $ = (id) => document.getElementById(id);
@@ -224,12 +228,39 @@ async function loadCam() {
   }
 }
 
+/* Rebuild the "explain class" dropdown from whatever the server said its
+ * classes are, keeping the current selection if it still exists. */
+function syncExplainOptions() {
+  const previous = els.camClass.value;
+
+  els.camClass.replaceChildren(...[
+    ['', 'Predicted class'],
+    ...CLASSES.map((name) => [name, name]),
+  ].map(([value, label]) => {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = label;
+    return option;
+  }));
+
+  els.camClass.value = CLASSES.includes(previous) ? previous : '';
+}
+
 /* ------------------------------------------------------------------ health */
 
 async function checkHealth() {
   try {
     const response = await fetch(`${apiBase()}/health`);
     const data = await response.json();
+
+    /* Take the server's class list rather than trusting the constant above.
+     * The page and the API can be different versions -- a phone with the old
+     * page cached talking to a rebuilt laptop is the normal case here -- and a
+     * stale list would put the wrong name on every probability bar. */
+    if (Array.isArray(data.classes) && data.classes.length) {
+      CLASSES = data.classes;
+      syncExplainOptions();
+    }
 
     if (data.model_loaded) {
       els.health.textContent = `API ready · ${data.backbone} on ${data.device}`;

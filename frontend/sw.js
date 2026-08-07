@@ -10,7 +10,10 @@
  * available offline.
  */
 
-const CACHE = 'cxr-shell-v1';
+/* Bump this on every shell change. The activate handler deletes every cache
+ * whose name is not this one, so the rename is what evicts the old copy --
+ * leaving it fixed means the old files are never purged. */
+const CACHE = 'cxr-shell-v2';
 
 const SHELL = [
   '.',
@@ -47,7 +50,28 @@ self.addEventListener('fetch', (event) => {
   if (request.method !== 'GET') return;
   if (new URL(request.url).origin !== self.location.origin) return;
 
+  /* Network first, cache only as the offline fallback.
+   *
+   * This was cache-first, which is the usual choice for an app shell and is
+   * wrong here. Cache-first serves whatever it stored on the first visit and
+   * never checks again, so a rebuilt page never reaches anyone who had already
+   * opened it. That is not merely stale: app.js carries the class list, and an
+   * older copy talking to a newer API renders one bar per class it knows about
+   * and silently drops the rest — probabilities that no longer sum to 100% and
+   * a missing class, with nothing on screen saying so.
+   *
+   * Offline still works: the cache answers whenever the network does not. The
+   * cost is a network round trip on each shell request while online, which for
+   * a handful of small files is not worth a wrong label. */
   event.respondWith(
-    caches.match(request).then((hit) => hit || fetch(request))
+    fetch(request)
+      .then((response) => {
+        if (response.ok) {
+          const copy = response.clone();
+          caches.open(CACHE).then((cache) => cache.put(request, copy));
+        }
+        return response;
+      })
+      .catch(() => caches.match(request))
   );
 });

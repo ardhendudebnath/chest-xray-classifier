@@ -9,7 +9,7 @@
  *
  * One colour rule specific to this app, and it matters:
  *
- *   The three classes are NOT colour-coded by severity. COVID19 does not get
+ *   The classes are NOT colour-coded by severity. COVID19 does not get
  *   red and NORMAL does not get green. This model is not a diagnosis, and a
  *   green bar reading "NORMAL 94%" is an all-clear that nobody is entitled to
  *   give. Probability bars are all one neutral colour and rank by length only.

@@ -81,9 +81,9 @@
     <div id="warn-ood" class="warn warn-stop" hidden>
       <strong>This does not look like a chest X-ray.</strong>
       It sits far outside everything the model was trained on, so the scores
-      below are not an answer about this image. They are what a three-class
-      softmax returns when it is handed something it has no class for, and it
-      returns them just as confidently as it would for a real film.
+      below are not an answer about this image. They are what a softmax over a
+      fixed set of classes returns when handed something it has no class for,
+      and it returns them just as confidently as it would for a real film.
     </div>
 
     <!-- The weak one, and labelled as weak. It only catches the model being -->
@@ -109,7 +109,7 @@
     <div id="bars" class="bars"></div>
 
     <p class="muted small">
-      These are softmax scores across three classes. They always sum to 100%,
+      These are softmax scores across the model's classes. They always sum to 100%,
       and say nothing about how likely a patient is to have anything — the
       training data's class balance is not real-world prevalence.
     </p>
@@ -120,9 +120,12 @@
 
     <div class="row">
       <label for="cam-class" class="muted small">Explain class</label>
+      <!-- Rebuilt from /health on load, so the list follows the server's
+           classes rather than whatever this page was built with. -->
       <select id="cam-class">
         <option value="">Predicted class</option>
         <option value="COVID19">COVID19</option>
+        <option value="LUNG_OPACITY">LUNG_OPACITY</option>
         <option value="NORMAL">NORMAL</option>
         <option value="PNEUMONIA">PNEUMONIA</option>
       </select>
@@ -162,11 +165,12 @@
         estimates how likely any given patient is to have anything.
       </li>
       <li>
-        <strong>Three classes is not every finding.</strong> The check above
-        catches images that are not chest X-rays. It does not catch a real
-        chest X-ray showing something this model has no class for — tested on
-        lung opacity films, most were accepted and then called NORMAL at high
-        confidence. "NORMAL" here means "not the other two", never "clear".
+        <strong>Four classes is not every finding.</strong> Lung opacity is one
+        of them now, precisely because it used to be absorbed into NORMAL at
+        high confidence. But the list is still short and the chest is not:
+        effusion, pneumothorax, nodules and everything else have no output here
+        and will land on whichever class is nearest. <strong>"NORMAL" means
+        "not the other three", never "clear".</strong>
       </li>
     </ul>
     <p class="muted small">

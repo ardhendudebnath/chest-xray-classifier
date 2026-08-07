@@ -48,31 +48,32 @@ def model_on_cpu(checkpoint):
 
 
 def test_the_class_is_found_at_any_depth(tmp_path):
-    assert label_of(tmp_path / "Data" / "train" / "NORMAL" / "a.png") == 1
-    assert label_of(tmp_path / "COVID19" / "images" / "a.png") == 0
-    assert label_of(tmp_path / "x" / "PNEUMONIA" / "y" / "a.png") == 2
+    assert label_of(tmp_path / "Data" / "train" / "NORMAL" / "a.png") == CLASSES.index("NORMAL")
+    assert label_of(tmp_path / "COVID19" / "images" / "a.png") == CLASSES.index("COVID19")
+    assert label_of(tmp_path / "x" / "LUNG_OPACITY" / "y" / "a.png") == CLASSES.index("LUNG_OPACITY")
 
 
 def test_the_deepest_class_directory_wins(tmp_path):
     """A path with two class names in it is ambiguous; the one nearest the
     image is the one that labelled it."""
-    assert label_of(tmp_path / "NORMAL" / "COVID19" / "a.png") == 0
+    assert label_of(tmp_path / "NORMAL" / "COVID19" / "a.png") == CLASSES.index("COVID19")
 
 
 def test_an_unlabelled_path_is_dropped_not_guessed(tmp_path):
-    """Lung_Opacity has no class here. Silently folding it into one of the
-    three would put a finding the model has no output for into the score."""
-    assert label_of(tmp_path / "Lung_Opacity" / "images" / "a.png") is None
+    """Tuberculosis has no class here. Silently folding it into one of the four
+    would put a finding the model has no output for into the score -- which is
+    exactly the mistake that adding LUNG_OPACITY was meant to stop making."""
+    assert label_of(tmp_path / "Tuberculosis" / "images" / "a.png") is None
 
     paths = [
         tmp_path / "NORMAL" / "a.png",
-        tmp_path / "Lung_Opacity" / "b.png",
+        tmp_path / "Tuberculosis" / "b.png",
         tmp_path / "COVID19" / "c.png",
     ]
     kept, labels, dropped = labelled(paths)
 
     assert len(kept) == 2
-    assert labels.tolist() == [1, 0]
+    assert labels.tolist() == [CLASSES.index("NORMAL"), CLASSES.index("COVID19")]
     assert len(dropped) == 1
 
 

@@ -30,9 +30,17 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision import datasets, transforms
 
 # Alphabetical, so this matches the order ImageFolder assigns. Index 0 is
-# COVID19, 1 is NORMAL, 2 is PNEUMONIA -- in training, in evaluation, and in
-# the served API.
-CLASSES = ["COVID19", "NORMAL", "PNEUMONIA"]
+# COVID19, 1 is LUNG_OPACITY, 2 is NORMAL, 3 is PNEUMONIA -- in training, in
+# evaluation, and in the served API.
+#
+# LUNG_OPACITY is here because leaving it out was worse than the alternative.
+# It ships with the Radiography Database and was skipped for three releases as
+# "a broader finding than pneumonia", which is true and was not the point: the
+# model still met those films and had to answer, so it called them NORMAL 94.2%
+# of the time at a mean confidence of 0.972. A class the model has no output
+# for does not go away, it gets absorbed into whichever class is nearest, and
+# here that was the one a reader is most likely to act on.
+CLASSES = ["COVID19", "LUNG_OPACITY", "NORMAL", "PNEUMONIA"]
 NUM_CLASSES = len(CLASSES)
 
 IMG_SIZE = 224
@@ -113,7 +121,7 @@ def class_weights(dataset):
     Averaged over the dataset these come to 1.0 -- every class contributes
     total/NUM_CLASSES to sum(count * weight) -- so a weighted run sits on the
     same loss scale as an unweighted one and --lr carries over between them.
-    Averaged over the three classes they do not, and climb with the imbalance.
+    Averaged over the four classes they do not, and climb with the imbalance.
     Only the ratios reach the optimizer regardless: CrossEntropyLoss divides by
     the summed weights of the batch, so a constant factor cancels.
     """

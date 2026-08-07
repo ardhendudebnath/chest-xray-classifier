@@ -1,4 +1,4 @@
-"""The classifier: an ImageNet-pretrained backbone with a fresh 3-class head.
+"""The classifier: an ImageNet-pretrained backbone with a fresh 4-class head.
 
 Training a CNN from scratch needs far more labelled images than the public
 chest X-ray sets provide, and it would spend its first several epochs
@@ -29,7 +29,7 @@ DEFAULT_BACKBONE = "resnet18"
 
 
 def build_model(backbone=DEFAULT_BACKBONE, pretrained=True, freeze_backbone=False):
-    """A backbone with its 1000-class ImageNet head swapped for a 3-class one.
+    """A backbone with its 1000-class ImageNet head swapped for a 4-class one.
 
     freeze_backbone trains only the new head. That is the right first move when
     the training set is small -- a few hundred images per class -- because
@@ -57,7 +57,7 @@ def build_model(backbone=DEFAULT_BACKBONE, pretrained=True, freeze_backbone=Fals
 
 
 def head_layer(model, backbone):
-    """The 3-class layer that replaced the ImageNet one."""
+    """The 4-class layer that replaced the ImageNet one."""
     if backbone.startswith("resnet"):
         return model.fc
     if backbone == "densenet121":
@@ -95,7 +95,7 @@ def target_layer(model, backbone):
 def forward_with_features(model, backbone, batch):
     """Returns (logits, penultimate features) from a single forward pass.
 
-    The features are whatever the 3-class head is handed -- 512 numbers for
+    The features are whatever the 4-class head is handed -- 512 numbers for
     resnet18, 2048 for resnet50, 1024 for densenet121 -- read off with a forward
     hook on the head itself. Hooking the head rather than naming a layer per
     backbone means this keeps working for any of the three: torchvision pools

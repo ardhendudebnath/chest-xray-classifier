@@ -1,6 +1,6 @@
 """Is this even a chest X-ray? A distance check that softmax cannot do.
 
-The three-class head has no way to say "none of these". Softmax normalises
+The four-class head has no way to say "none of these". Softmax normalises
 whatever it is given, so any image at all gets a probability distribution, and
 off-distribution inputs do not come out uncertain -- they come out wrong and
 confident. Against `checkpoints/best.pt` a flat grey square scored COVID19 at
@@ -8,7 +8,7 @@ confident. Against `checkpoints/best.pt` a flat grey square scored COVID19 at
 the confidence catches none of that, because there is no confidence to threshold.
 
 The signal is in the layer before. A logit says how much the image looks like
-COVID19 relative to the other two classes; the penultimate feature vector says
+COVID19 relative to the other three; the penultimate feature vector says
 what the image looks like at all, and off-distribution inputs land somewhere no
 training image ever did. So: fit a Gaussian per class over the training
 features, measure Mahalanobis distance to the nearest one, and reject anything
@@ -42,9 +42,15 @@ own cutoff, applied by whichever class the image is nearest.
 
 Read what this does and does not establish in the README before quoting it. It
 detects "unlike the training images", which is not the same as "not a chest
-X-ray" and is much further from "the model cannot handle this". Lung_Opacity
-films from this same dataset -- real chest X-rays, of a finding with no class
-here -- are mostly accepted, and then confidently called NORMAL.
+X-ray" and is much further still from "the model cannot handle this".
+
+Lung opacity used to be the demonstration of that gap: real chest X-rays, of a
+finding the model had no class for, mostly accepted here and then confidently
+called NORMAL. It is a class now, which fixes those films and not the general
+case. Any finding outside the four -- effusion, pneumothorax, a nodule -- is a
+real chest X-ray that looks like the training data to this check, and will be
+accepted and then labelled with whichever class is nearest. Widening the class
+list moves that boundary; it does not remove it.
 """
 
 import argparse
@@ -103,7 +109,7 @@ def collect_features(model, backbone, loader, device):
 def fit_gaussians(features, labels):
     """Class means and one shared precision matrix. Returns (means, precision, shrinkage).
 
-    One covariance for all three classes rather than one each. Per-class
+    One covariance for all four classes rather than one each. Per-class
     covariances need per-class sample sizes to estimate them, and COVID19 and
     PNEUMONIA are both a fraction of NORMAL here -- the classes whose
     covariance would be worst estimated are the ones the model is least
@@ -162,7 +168,7 @@ def score(features, stats):
 
     Nearest rather than the predicted class's: the question is whether this
     image resembles anything the model was trained on, and an image sitting far
-    from all three means is off-distribution regardless of which one it is
+    from every class mean is off-distribution regardless of which one it is
     marginally closest to. The index comes back because the cutoff is per class
     and the caller needs to know which one to apply.
     """

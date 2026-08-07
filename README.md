@@ -1,6 +1,7 @@
 # Chest X-ray classifier
 
-A three-class CNN over chest radiographs: **NORMAL**, **PNEUMONIA**, **COVID19**.
+A four-class CNN over chest radiographs: **NORMAL**, **PNEUMONIA**, **COVID19**,
+**LUNG_OPACITY**.
 
 It lives beside the triage app but does not import from it and is not wired into
 it. The triage backend reads symptom text; this reads an image. Keeping them
@@ -10,7 +11,7 @@ apart means the backend does not have to carry a multi-gigabyte torch install.
 
 This is a research prototype trained on public datasets. It is not a medical
 device, it has not been validated on any clinical population, and a number it
-returns is not a finding. Three specific reasons to distrust it, beyond the
+returns is not a finding. Four specific reasons to distrust it, beyond the
 usual:
 
 - **The public COVID-19 X-ray sets are assembled from different sources per
@@ -29,11 +30,13 @@ usual:
   confirmed, some radiologist-read, some neither.
 - **The class balance is not the real prevalence.** Nothing here estimates how
   likely a given patient is to have anything.
-- **Three classes is not every finding, and NORMAL does not mean clear.** Shown
-  600 `Lung_Opacity` films from this same dataset — real chest X-rays with a
-  finding that is not one of the three — it called them NORMAL 94.2% of the
-  time at a mean confidence of 0.972. The out-of-distribution check catches
-  only a third of them. See [Is it even a chest X-ray?](#is-it-even-a-chest-x-ray).
+- **Four classes is not every finding, and NORMAL does not mean clear.**
+  LUNG_OPACITY is a class here only because leaving it out was measurably
+  worse: the three-class model met those films anyway and called them NORMAL
+  94.2% of the time at a mean confidence of 0.972. Adding a class fixes that
+  one case and not the general one. Effusion, pneumothorax, nodules and
+  everything else still have no output and still land on whichever class is
+  nearest. **NORMAL means "not the other three", never "clear".**
 
 Grad-CAM is included for exactly this reason. It is not decoration.
 
@@ -41,10 +44,11 @@ Grad-CAM is included for exactly this reason. It is not decoration.
 
 ```
 src/dataset.py         loaders, transforms, the two imbalance corrections
-src/model.py           backbone + 3-class head, checkpoint save/load
+src/model.py           backbone + 4-class head, checkpoint save/load
 src/train.py           fine-tuning loop, selects on macro F1
 src/evaluate.py        per-class report and confusion matrix
 src/ood.py             fits the "is this even a chest X-ray" check
+src/probe_ood.py       scores six non-radiographs, to check that it still works
 src/gradcam_utils.py   heatmaps, and a CLI for one image
 src/prepare_data.py    normalise a download into data/{train,val,test}/CLASS/
 src/dataset_overlap.py whether two datasets share images, before trusting one
@@ -135,8 +139,14 @@ Unzip anywhere, then normalise it into the layout the loaders expect:
 ```
 
 `prepare_data` handles the naming differences between the two ("COVID" vs
-"COVID19", "Viral Pneumonia" vs "PNEUMONIA") and skips `Lung_Opacity`, which is
-a broader finding than pneumonia and is not one of our three classes.
+"COVID19", "Viral Pneumonia" vs "PNEUMONIA", "Lung_Opacity" vs "LUNG_OPACITY").
+Lung opacity is kept as its own class and never folded into pneumonia — it is a
+broader finding, and merging them would change what the model claims to detect.
+
+**Only the Radiography Database has all four.** The smaller Kermany-derived sets
+carry no lung opacity directory, so they cannot train this model; `prepare_data`
+stops with a message rather than writing a split with a class missing, which
+ImageFolder would silently renumber the rest around.
 
 It also **keeps one patient's images in a single split**. The Kermany pneumonia
 images are named `person1_virus_6`, `person1_bacteria_1` and so on — several
@@ -147,9 +157,17 @@ the published train/test split is pooled and redone rather than used as-is.
 ## Train
 
 ```bash
-~/venvs/smt/Scripts/python.exe -m src.train --epochs 15 --freeze-backbone --out checkpoints/stage1.pt
-~/venvs/smt/Scripts/python.exe -m src.train --epochs 25 --lr 1e-4 --resume checkpoints/stage1.pt --out checkpoints/best.pt
+~/venvs/smt/Scripts/python.exe -m src.train --epochs 15 --freeze-backbone --num-workers 4 --out checkpoints/stage1.pt
+~/venvs/smt/Scripts/python.exe -m src.train --epochs 25 --lr 1e-4 --num-workers 4 --resume checkpoints/stage1.pt --out checkpoints/best.pt
 ```
+
+**Pass `--num-workers`.** It defaults to 0 because a worker on Windows
+re-imports the calling module and deadlocks unless the entry point is guarded,
+and `build_loader` is called from places that are not. `python -m src.train` is
+guarded, so workers are safe there — and they matter: decoding 21k JPEGs on one
+thread left this GPU 12% busy at roughly 3 minutes an epoch. With four workers
+it sat near 50% and under a minute, which is the difference between a coffee
+and an afternoon.
 
 The second stage lands on `checkpoints/best.pt`, which is where `src.evaluate`,
 `src.gradcam_utils` and the API all look by default. `--out` is spelled out
@@ -215,18 +233,64 @@ look anatomically sensible. Heat on the lungs is necessary, not sufficient.
 
 ## Results
 
-resnet18, COVID-19 Radiography Database, 15,153 images split 70/15/15 with the
-two-stage recipe above. Test set, 2,273 images:
+resnet18, COVID-19 Radiography Database, 21,165 images split 70/15/15 with the
+two-stage recipe above. Test set, 3,175 images:
 
-| | macro F1 | accuracy | COVID19 F1 | NORMAL F1 | PNEUMONIA F1 |
+| four-class | macro F1 | accuracy | COVID19 F1 | LUNG_OPACITY F1 | NORMAL F1 | PNEUMONIA F1 |
+|---|---|---|---|---|---|---|
+| as downloaded | 0.9587 | 0.9524 | 0.982 | 0.929 | 0.953 | 0.970 |
+
+**Do not quote these on their own.** The classes in this dataset are 100%
+separable by provenance — see [What this is not](#what-this-is-not) — so a high
+score is exactly what a model would produce by learning which repository an
+image came from.
+
+The headline number went down when the class was added, 0.9816 → 0.9587. Read
+those two side by side with care. They are macro F1 over different class sets on
+different test splits, 2,273 images then and 3,175 now, so the difference is not
+a like-for-like regression on a fixed task.
+
+The two splits are not nested either, and the reason is worth knowing before you
+compare any two runs here. `prepare_data` draws from one `random.Random(seed)`
+inside its loop over `CLASSES`, so inserting a class shifts the stream for every
+class sorting after it — the same seed puts different NORMAL and PNEUMONIA
+images in test than it did with three classes. The per-class counts are
+identical (542 / 1529 / 202) only because each class lands on its 15% by
+construction, which makes them no evidence at all that the images are the same.
+COVID19 sorts first and is unaffected.
+
+With that said, the per-class columns are the closest thing to a like-for-like
+view, and they say where the loss went:
+
+| F1 | COVID19 | NORMAL | PNEUMONIA |
+|---|---|---|---|
+| three-class | 0.993 | 0.992 | 0.960 |
+| four-class | 0.982 | 0.953 | 0.970 |
+
+**NORMAL took almost all of the loss**, 0.992 → 0.953, and pneumonia went up.
+That is the shape you would predict if the three-class NORMAL had been quietly
+absorbing lung opacity films, which is exactly what it was doing: shown 600 of
+them it called 94.2% NORMAL at a mean confidence of 0.972, and reported nothing
+unusual about any of it. The four-class model gets them wrong differently — 72
+of 902 still land on NORMAL, and 48 normal films now come back LUNG_OPACITY,
+which is why LUNG_OPACITY is the weakest class at 0.929.
+
+The confusion is real either way. The difference is that it is now on the
+confusion matrix instead of inside the NORMAL column, so the drop is a failure
+becoming visible rather than one being introduced.
+
+### The lung-masking check — three-class model
+
+**These numbers come from the superseded three-class model and have not been
+re-measured since LUNG_OPACITY was added.** They are kept because what they
+establish is a property of the dataset rather than of the class list, and
+re-running costs a full two-stage train. Do not read them beside the table
+above as if both describe the same model.
+
+| three-class | macro F1 | accuracy | COVID19 F1 | NORMAL F1 | PNEUMONIA F1 |
 |---|---|---|---|---|---|
 | as downloaded | 0.9816 | 0.9894 | 0.993 | 0.992 | 0.960 |
 | lungs only    | 0.9615 | 0.9718 | 0.961 | 0.979 | 0.945 |
-
-**Do not quote the first row on its own.** The classes in this dataset are
-100% separable by provenance — see [What this is not](#what-this-is-not) — so a
-high score is exactly what a model would produce by learning which repository
-an image came from.
 
 The second row is the same recipe trained on a mirror of the same split with
 every non-lung pixel zeroed. Roughly 77% of each image is removed, including all
@@ -241,8 +305,12 @@ by two points rather than collapsing. To reproduce it:
 ```
 
 It mirrors an existing split rather than re-splitting, so the two runs differ in
-exactly one variable. Masks ship with the Radiography Database; most other
-downloads have none.
+exactly one variable. Masks ship with the Radiography Database, for all four
+classes; most other downloads have none.
+
+Those commands run against the current code, so they would now produce the
+four-class version of this experiment rather than the numbers in the table —
+which is the re-measurement, not a reproduction of it.
 
 What that establishes, and what it does not:
 
@@ -262,7 +330,15 @@ Nothing internal to this dataset can settle it, because the correlation is
 total by construction. That needs a COVID-19 set from different hospitals,
 where provenance no longer predicts the label.
 
-### Scored against a second dataset
+### Scored against a second dataset — three-class model
+
+**These numbers are the superseded three-class model's, and cannot be reproduced
+as-is.** `prashant268/chest-xray-covid19-pneumonia` carries no lung opacity
+directory at all, so a four-class model cannot be scored on it without deciding
+what a LUNG_OPACITY prediction means against labels that have no such class.
+What the section establishes — that a naive cross-dataset score is measuring
+contamination — is a property of the two downloads and does not depend on the
+class list. Do not read the F1 figures here beside the four-class table above.
 
 The obvious next move is to score against a different download. Done naively it
 measures nothing. `prashant268/chest-xray-covid19-pneumonia` shares **23.9%** of
@@ -320,7 +396,7 @@ does not establish that it reads pathology rather than provenance.
 - `POST /predict` — multipart `file`. Returns the ranked distribution, plus
   `out_of_distribution` with the `ood_score` and the `ood_threshold` actually
   applied. `low_confidence` is still there and is still only a weak hint: it
-  catches the model being torn between its three classes, which is a much
+  catches the model being torn between its four classes, which is a much
   narrower failure than being handed something that is not a chest X-ray.
 
   `out_of_distribution` is `null` when no statistics are loaded — meaning the
@@ -380,24 +456,40 @@ Four deliberate choices in the UI:
 ## Is it even a chest X-ray?
 
 `low_confidence` was documented here as the signal that an image was out of
-distribution. It never did that job. Softmax over three classes normalises
-whatever it is handed, so an image unlike anything in training does not come
-back uncertain — it comes back wrong and certain. Measured against
+distribution. It never did that job. Softmax over a fixed set of classes
+normalises whatever it is handed, so an image unlike anything in training does
+not come back uncertain — it comes back wrong and certain. Measured against
 `checkpoints/best.pt`:
 
 | input | prediction | `low_confidence` |
 |---|---|---|
-| flat grey square | COVID19 100.00% | not flagged |
-| flat black square | COVID19 100.00% | not flagged |
-| flat white square | COVID19 99.67% | not flagged |
-| uniform noise | COVID19 99.96% | not flagged |
-| smooth colour photo | COVID19 100.00% | not flagged |
-| a page of text | COVID19 99.86% | not flagged |
+| flat grey square | COVID19 99.42% | not flagged |
+| flat black square | COVID19 99.36% | not flagged |
+| flat white square | COVID19 98.75% | not flagged |
+| uniform noise | COVID19 100.00% | not flagged |
+| smooth colour image \* | COVID19 99.86% | not flagged |
+| a page of text \* | COVID19 99.98% | not flagged |
 
 No cutoff on that column separates "a chest X-ray it is sure about" from "not a
-chest X-ray at all", because there is no uncertainty in it to threshold.
+chest X-ray at all", because there is no uncertainty in it to threshold. Adding
+a fourth class changed nothing about this: the four-class model answers COVID19
+above 98.7% for every one of them, exactly as the three-class one did.
 
-`src/ood.py` measures a different thing. The logits are three numbers that have
+Both columns of this table, and the scores below, come from:
+
+```bash
+~/venvs/smt/Scripts/python.exe -m src.probe_ood
+```
+
+It generates the six inputs rather than storing them, so the table can be
+regenerated against any checkpoint. `--save-dir` writes them out to look at.
+
+\* The first four inputs are fully determined by their names and match what was
+measured before. The colour image and the text page are stand-ins — the original
+ad-hoc files predate the script and were not kept — so those two rows are new
+measurements rather than a re-run of the earlier ones.
+
+`src/ood.py` measures a different thing. The logits are four numbers that have
 already discarded everything except how much the image resembles each class; the
 512-number feature vector feeding them still carries whether it resembled
 anything. So: fit a Gaussian per class over the training features, take the
@@ -409,54 +501,74 @@ This is the standard construction, from Lee et al. 2018.
 ```
 
 Fit on `train`, cutoffs calibrated on `val`, both with augmentation off. Every
-one of the six inputs above is now refused, by a wide margin — they score 2,733
-to 7,384 against cutoffs between 713 and 1,467.
+one of the six inputs above is refused, by a wide margin — they score 1,594 to
+21,485, all nearest to COVID19, against that class's cutoff of 939.8.
 
-**The cutoff is per class, and that is not a detail.** A single pooled cutoff at
-the 95th percentile reported a reassuring 4.5% false-reject rate while actually
-refusing 30.2% of real pneumonia films and 0.4% of normal ones — the pooled
-number was set by NORMAL, which is two thirds of the split. It is the same trap
-as reading accuracy instead of per-class recall, one level down. Calibrated per
-class and applied by whichever class an image is nearest, on the held-out test
-split:
+**The cutoff is per class, and that is not a detail.** Measured on the
+three-class model, a single pooled cutoff at the 95th percentile reported a
+reassuring 4.5% false-reject rate while actually refusing 30.2% of real
+pneumonia films and 0.4% of normal ones — the pooled number was set by NORMAL,
+which was two thirds of that split. It is the same trap as reading accuracy
+instead of per-class recall, one level down, and it is a property of the class
+imbalance rather than of the class list.
+
+Calibrated per class and applied by whichever class an image is nearest, fitted
+on 14,814 training images and calibrated on 3,176 validation ones at p95. On the
+held-out test split:
 
 | | cutoff | real X-rays refused |
 |---|---|---|
-| COVID19 | 1054.5 | 3.7% (20/542) |
-| NORMAL | 712.8 | 3.9% (60/1529) |
-| PNEUMONIA | 1467.3 | 3.5% (7/202) |
+| COVID19 | 939.8 | 6.6% (36/542) |
+| LUNG_OPACITY | 822.5 | 5.1% (46/902) |
+| NORMAL | 653.4 | 4.1% (63/1529) |
+| PNEUMONIA | 1310.4 | 6.4% (13/202) |
+| pooled | — | 5.0% (158/3175) |
+
+**The cost went up with the fourth class.** The three-class model refused
+3.5–3.9% per class; this one refuses 4.1–6.6%. A p95 calibration implies about
+5%, so it is the three-class figure that was the outlier — the four-class rates
+are what this knob has been promising all along. If you were reading 3.8% as the
+price of the check, the price is 5%.
 
 `--percentile` is the knob, and it has a cost on both sides: the default 95
-spends about one real X-ray in twenty to catch the inputs above.
+spends about one real X-ray in twenty to catch inputs like the six above.
 
 ### What this does not do
 
 It answers "unlike the training images". That is **not** the same as "not a
 chest X-ray", and much further still from "the model cannot handle this".
 
-The dataset makes the gap easy to measure. `Lung_Opacity` ships in the same
-download and is excluded from training as a broader finding than pneumonia —
-real chest X-rays, same repositories, showing something this model has no class
-for. Of 600 of them, only 34.5% are refused. The rest are accepted and then
+Lung opacity is how that gap got measured here. `Lung_Opacity` ships in the same
+download and was excluded from training as a broader finding than pneumonia —
+real chest X-rays, same repositories, showing something the model had no class
+for. Of 600 of them, only 34.5% were refused. The rest were accepted and then
 called **NORMAL 94.2% of the time, at a mean confidence of 0.972**.
 
-That is the more dangerous failure, and this check does not catch it. A caller
-gets "looks like a chest X-ray" and "NORMAL", about a film with a real opacity
-on it. Nothing here can fix that, because a three-class head has no output for
-it: NORMAL means "not the other two", never "clear". Catching it needs classes
-for the findings you care about, or a model that can abstain by design.
+That measurement is why LUNG_OPACITY is a class now. It does not follow that the
+gap is closed. What those films demonstrated was never specific to lung opacity;
+it was that the class list is shorter than the chest, and it still is. Effusion,
+pneumothorax, nodules, masses, fibrosis — each is a real chest X-ray that looks
+like the training data to this check, so it is accepted, and then labelled with
+whichever of the four classes is nearest. The old evidence says that will
+disproportionately be NORMAL, which is the direction that costs the most.
+
+So a caller still gets "looks like a chest X-ray" and "NORMAL" about a film with
+a real finding on it. Adding a class moved that boundary out by one finding; it
+did not remove it, and it cannot. **NORMAL means "not the other three", never
+"clear".** Catching the general case needs classes for every finding you care
+about, or a model that can abstain by design.
 
 There is also the confound running through the whole project. What the training
 images have in common includes their provenance, so an ordinary chest X-ray from
 a hospital outside these datasets is exactly the kind of thing that scores far
-away and gets refused. The 3.5–3.9% above is measured against images from the
-same four repositories, and is a floor rather than an estimate.
+away and gets refused. A false-reject rate measured against images from the same
+four repositories is a floor rather than an estimate.
 
-**How much of a floor is now measured.** On the clean images of a second
-dataset — see [Scored against a second dataset](#scored-against-a-second-dataset)
-— the refusal rate roughly doubles:
+**How much of a floor was measured — three-class model.** On the clean images of
+a second dataset — see [Scored against a second dataset](#scored-against-a-second-dataset--three-class-model)
+— the refusal rate roughly doubled:
 
-| | same dataset, held out | second dataset, clean |
+| three-class | same dataset, held out | second dataset, clean |
 |---|---|---|
 | COVID19 | 3.7% | 10.3% |
 | NORMAL | 3.9% | 1.8% |

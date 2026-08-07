@@ -9,7 +9,7 @@ and nothing it returns should be treated as a clinical finding. Sending the
 number back without that context is how a demo turns into someone's decision.
 
 /predict also reports whether the image resembles anything the model was
-trained on, which the probabilities cannot say for themselves -- a three-class
+trained on, which the probabilities cannot say for themselves -- a fixed-class
 softmax answers confidently no matter what it is handed. That check needs
 statistics fitted by src.ood; without them the field is null, meaning the
 question was not asked rather than answered in the negative.
@@ -226,7 +226,7 @@ async def predict(file: UploadFile = File(...)):
         "prediction": label,
         "confidence": round(confidence, 4),
         "probabilities": {name: round(value, 4) for name, value in ranked},
-        # A 3-class softmax always sums to 1, so it names a class for any image
+        # A softmax over a fixed class list always sums to 1, so it names a class for any image
         # at all. This flag catches only the case where it is visibly torn
         # between the three; it does not catch a confident answer to a question
         # that was never asked, which is what out_of_distribution is for.

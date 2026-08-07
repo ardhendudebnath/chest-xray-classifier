@@ -30,17 +30,25 @@ from src.ood import (
     score,
 )
 
-TRUE_MEANS = np.array([[0.0, 0.0], [12.0, 0.0], [0.0, 12.0]])
+SPREAD = 12.0
+
+# One mean per class, each out along its own axis. Derived from NUM_CLASSES
+# rather than written out, so adding a class does not silently leave a test
+# fitting three Gaussians to four classes' worth of features.
+DEFAULT_DIM = NUM_CLASSES
 
 
-def gaussian_features(rng, per_class=400, dim=2, means=None):
-    """Points around three well-separated means, sharing one covariance."""
-    means = TRUE_MEANS if means is None else means
-    padded = np.zeros((NUM_CLASSES, dim))
-    padded[:, : means.shape[1]] = means[:, :dim] if dim < means.shape[1] else means
+def true_means(dim=DEFAULT_DIM):
+    if dim < NUM_CLASSES:
+        raise ValueError(f"Need at least {NUM_CLASSES} dimensions to separate them.")
+    return SPREAD * np.eye(NUM_CLASSES, dim)
 
+
+def gaussian_features(rng, per_class=400, dim=DEFAULT_DIM):
+    """Points around well-separated means, one per class, sharing a covariance."""
+    means = true_means(dim)
     features = np.concatenate(
-        [rng.normal(padded[index], 1.0, (per_class, dim)) for index in range(NUM_CLASSES)]
+        [rng.normal(means[index], 1.0, (per_class, dim)) for index in range(NUM_CLASSES)]
     )
     labels = np.repeat(np.arange(NUM_CLASSES), per_class)
     return features, labels
@@ -66,33 +74,34 @@ def test_fit_recovers_the_means_it_was_given():
     features, labels = gaussian_features(np.random.default_rng(0))
     means, _, _ = fit_gaussians(features, labels)
 
-    assert means.shape == (NUM_CLASSES, 2)
-    assert np.allclose(means, TRUE_MEANS, atol=0.2)
+    assert means.shape == (NUM_CLASSES, DEFAULT_DIM)
+    assert np.allclose(means, true_means(), atol=0.2)
 
 
 def test_in_distribution_distance_matches_the_dimension():
     """Squared Mahalanobis distance to one's own mean is chi-square with d
     degrees of freedom, so it averages d. Getting this scale right is what
     makes a percentile cutoff mean anything."""
-    features, labels = gaussian_features(np.random.default_rng(0), dim=2)
+    features, labels = gaussian_features(np.random.default_rng(0))
     means, precision, _ = fit_gaussians(features, labels)
 
     scores, _ = score(features, {"means": means, "precision": precision})
-    assert scores.mean() == pytest.approx(2.0, rel=0.15)
+    assert scores.mean() == pytest.approx(DEFAULT_DIM, rel=0.15)
 
 
 def test_a_distant_point_scores_far_higher_than_the_training_data(fitted):
-    scores, _ = score(np.array([[500.0, 500.0]]), fitted)
+    far = np.full((1, DEFAULT_DIM), 500.0)
+    scores, _ = score(far, fitted)
     in_distribution, _ = score(gaussian_features(np.random.default_rng(2))[0], fitted)
 
     assert scores[0] > 1000 * in_distribution.mean()
-    assert bool(is_out_of_distribution(*score(np.array([[500.0, 500.0]]), fitted), fitted))
+    assert bool(is_out_of_distribution(*score(far, fitted), fitted))
 
 
 def test_the_nearest_class_is_reported(fitted):
     """The cutoff applied depends on this index, so it has to be the right one."""
-    _, nearest = score(TRUE_MEANS, fitted)
-    assert nearest.tolist() == [0, 1, 2]
+    _, nearest = score(true_means(), fitted)
+    assert nearest.tolist() == list(range(NUM_CLASSES))
 
 
 def test_shrinkage_survives_more_dimensions_than_samples():
@@ -135,16 +144,21 @@ def test_distance_to_a_point_on_the_mean_is_zero(fitted):
 
 
 def test_cutoffs_are_per_class_not_pooled(fitted):
-    """Three cutoffs, and they are applied by nearest class. A pooled cutoff
-    set by the largest class is the bug this design exists to avoid."""
+    """One cutoff per class, applied by nearest class. A pooled cutoff set by
+    the largest class is the bug this design exists to avoid."""
     assert len(fitted["thresholds"]) == NUM_CLASSES
 
-    stats = {**fitted, "thresholds": [1e12, 0.0, 1e12]}
-    scores, nearest = score(TRUE_MEANS, stats)
+    # Everything permissive except class 1, which refuses everything.
+    thresholds = [1e12] * NUM_CLASSES
+    thresholds[1] = 0.0
+    stats = {**fitted, "thresholds": thresholds}
 
-    # Every point sits on its own mean, so distance is ~0 for all three. Only
+    scores, nearest = score(true_means(), stats)
+
+    # Every point sits on its own mean, so distance is ~0 for all of them. Only
     # the one judged against the zero cutoff comes back flagged.
-    assert is_out_of_distribution(scores, nearest, stats).tolist() == [False, True, False]
+    expected = [index == 1 for index in range(NUM_CLASSES)]
+    assert is_out_of_distribution(scores, nearest, stats).tolist() == expected
 
 
 def test_the_percentile_is_the_flagged_rate():

@@ -8,6 +8,7 @@ import torch
 from src.dataset import (
     CLASSES,
     IMG_SIZE,
+    NUM_CLASSES,
     build_dataset,
     build_loader,
     build_transforms,
@@ -70,7 +71,7 @@ def test_class_weights_favour_the_rare_class(data_root):
 
     assert weights["COVID19"] > weights["NORMAL"] > weights["PNEUMONIA"]
 
-    # Averaged over the dataset, not over the three classes -- the per-class
+    # Averaged over the dataset, not over the four classes -- the per-class
     # mean is only 1.0 when the classes are equal-sized. This is the form that
     # keeps a weighted run on the same loss scale as an unweighted one, and it
     # pins the constant: halving every weight, or dropping NUM_CLASSES from the
@@ -92,7 +93,7 @@ def test_sampler_draws_the_classes_about_evenly(data_root):
     share = {name: drawn[name] / sum(drawn.values()) for name in CLASSES}
 
     for name in CLASSES:
-        assert share[name] == pytest.approx(1 / 3, abs=0.08), share
+        assert share[name] == pytest.approx(1 / NUM_CLASSES, abs=0.08), share
 
 
 def test_loader_batches_have_the_expected_shapes(data_root):

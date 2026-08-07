@@ -76,13 +76,15 @@ def test_mask_directories_resolve_through_the_shared_aliases(tmp_path):
 
 
 def test_a_masks_directory_outside_our_classes_is_ignored(tmp_path):
-    """Lung_Opacity ships masks too and is deliberately not one of ours."""
+    """Tuberculosis ships masks in some downloads and is not one of ours.
+    Lung opacity is, so its masks are collected like any other class's."""
+    (tmp_path / "Tuberculosis" / "masks").mkdir(parents=True)
     (tmp_path / "Lung_Opacity" / "masks").mkdir(parents=True)
     (tmp_path / "COVID" / "masks").mkdir(parents=True)
 
     found = find_mask_dirs(tmp_path)
 
-    assert set(found) == {"COVID19"}
+    assert set(found) == {"COVID19", "LUNG_OPACITY"}
 
 
 def test_a_download_without_masks_finds_nothing(tmp_path):

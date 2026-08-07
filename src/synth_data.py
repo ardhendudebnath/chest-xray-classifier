@@ -5,14 +5,15 @@ first step for something whose only question is "does the code run end to end",
 so this generates a small stand-in set with the same directory layout, the same
 class imbalance, and a per-class signal a CNN can actually learn:
 
-    NORMAL      clear lung fields
-    PNEUMONIA   one bright consolidation in a single lung, lobar-looking
-    COVID19     faint bilateral patches out at the lung periphery
+    NORMAL        clear lung fields
+    PNEUMONIA     one bright consolidation in a single lung, lobar-looking
+    COVID19       faint bilateral patches out at the lung periphery
+    LUNG_OPACITY  a broad low-contrast haze over most of one lung
 
 Read this next part before quoting any number produced from these images.
 
 These are ellipses and Gaussian blobs. They are not radiographs, they are not
-derived from radiographs, and the pattern separating the three classes is one I
+derived from radiographs, and the pattern separating the four classes is one I
 drew on purpose to be learnable. A model will reach high 90s on them within a
 couple of epochs, and that result says only that gradients flow and the loaders
 are wired up correctly -- it is a unit test with pictures. It is not evidence
@@ -36,7 +37,12 @@ IMG_SIZE = 256
 # rarest. Kept because the sampler and the class weights are the parts of the
 # training code most likely to be wrong, and a balanced set would not exercise
 # them at all.
-CLASS_SHARE = {"COVID19": 0.5, "NORMAL": 1.0, "PNEUMONIA": 1.6}
+CLASS_SHARE = {
+    "COVID19": 0.5,
+    "LUNG_OPACITY": 0.85,
+    "NORMAL": 1.0,
+    "PNEUMONIA": 1.6,
+}
 
 
 def _blob(yy, xx, cy, cx, ry, rx):
@@ -88,6 +94,22 @@ def _render(class_name, rng):
             side + rng.uniform(-0.02, 0.02),
             rng.uniform(0.07, 0.11),
             rng.uniform(0.05, 0.08),
+        )
+
+    elif class_name == "LUNG_OPACITY":
+        # A broad, low-contrast haze over most of one lung, rather than the
+        # dense focal blob pneumonia gets. Deliberately the hardest pair to
+        # separate: on the real data these two are the confusion that matters,
+        # and a stand-in set where they were trivially separable would let a
+        # broken loader look fine.
+        side = 0.36 if rng.random() < 0.5 else 0.64
+        canvas += 0.18 * _blob(
+            yy,
+            xx,
+            lung_y + rng.uniform(-0.04, 0.04),
+            side + rng.uniform(-0.03, 0.03),
+            rng.uniform(0.16, 0.22),
+            rng.uniform(0.09, 0.13),
         )
 
     elif class_name == "COVID19":
