@@ -594,3 +594,18 @@ the check quietly refuses one real film in ten while reporting one in twenty.
 
 No dataset, no network, no pretrained download — synthetic images and untrained
 weights throughout.
+
+## Licence
+
+MIT — see [LICENSE](LICENSE). Use it for anything, keep the copyright notice.
+
+The licence covers the code and nothing else. It says nothing about the
+datasets, which carry their own terms from their respective Kaggle
+distributions, and it grants no rights to `checkpoints/best.pt`, which is not
+in this repository. Read [What this is not](#what-this-is-not) before doing
+anything with either.
+
+The warranty disclaimer in that file is not boilerplate here. This is a
+research prototype trained on data whose classes are separable by provenance,
+and it is offered with no promise that any number it produces means what it
+appears to mean.
