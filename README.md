@@ -23,7 +23,7 @@ usual:
   classes are perfectly separable by provenance before any lung is examined.
   See [Results](#results). Run Grad-CAM before believing any score. Scoring
   against a second download does not settle it either — that dataset turned out
-  to share 23.9% of its images with this one's training split, and the rest
+  to share 24.0% of its images with this one's training split, and the rest
   comes from the same public archives.
 - **The label is not the disease.** These labels came from whoever assembled
   the dataset, by varying and mostly undocumented criteria — some RT-PCR
@@ -336,18 +336,10 @@ Nothing internal to this dataset can settle it, because the correlation is
 total by construction. That needs a COVID-19 set from different hospitals,
 where provenance no longer predicts the label.
 
-### Scored against a second dataset — three-class model
-
-**These numbers are the superseded three-class model's, and cannot be reproduced
-as-is.** `prashant268/chest-xray-covid19-pneumonia` carries no lung opacity
-directory at all, so a four-class model cannot be scored on it without deciding
-what a LUNG_OPACITY prediction means against labels that have no such class.
-What the section establishes — that a naive cross-dataset score is measuring
-contamination — is a property of the two downloads and does not depend on the
-class list. Do not read the F1 figures here beside the four-class table above.
+### Scored against a second dataset
 
 The obvious next move is to score against a different download. Done naively it
-measures nothing. `prashant268/chest-xray-covid19-pneumonia` shares **23.9%** of
+measures nothing. `prashant268/chest-xray-covid19-pneumonia` shares **24.0%** of
 its 6,432 images with this model's training split — and **zero** of them match
 by checksum, because every copy had been resized or re-encoded on the way in.
 A hash comparison reports two completely independent datasets. See
@@ -356,34 +348,59 @@ A hash comparison reports two completely independent datasets. See
 So the images are partitioned first, and three numbers come out:
 
 ```bash
-~/venvs/smt/Scripts/python.exe -m src.cross_dataset --dataset ~/Downloads/chest-xray-cp/Data --exclude-against ~/cxr-data-real/train
+~/venvs/smt/Scripts/python.exe -m src.cross_dataset --dataset ~/Downloads/chest-xray-cp/Data --exclude-against ~/cxr-data-4class/train
 ```
 
 | | images | macro F1 | accuracy |
 |---|---|---|---|
-| all, contaminated | 6,432 | 0.9473 | 0.9633 |
-| overlapping only *(control)* | 1,537 | 0.9777 | 0.9850 |
-| **clean** | **4,895** | **0.9288** | **0.9565** |
+| all, contaminated | 6,432 | 0.9492 | 0.9667 |
+| overlapping only *(control)* | 1,545 | 0.9864 | 0.9903 |
+| **clean** | **4,887** | **0.9252** | **0.9593** |
 
 The middle row is the control and it is why the other two can be believed. Those
-are training images: the model recalls **100%** of their pneumonia cases,
-638 of 638. The clean set sits 4.9 points of macro F1 below that, so the filter
-is separating the right images. Leaving them in was worth **+0.0185** macro F1.
+are training images, and the model gets 671 of 671 of their normal films and 647
+of 647 of their pneumonia right. The clean set sits 6.1 points of macro F1 below
+that, so the filter is separating the right images. Leaving them in was worth
+**+0.0240** macro F1.
 
-Against 0.9816 on the held-out split of its own dataset, the clean number is
-**0.9288**. Per class, F1 goes 0.993 → 0.922 for COVID19, 0.992 → 0.886 for
-NORMAL, and 0.960 → 0.978 for PNEUMONIA. The last one rises partly because
-pneumonia is 74% of this dataset and was 9% of the other, so the per-class
-columns are not strictly like-for-like even though macro F1 absorbs most of it.
+#### The model has a class this dataset does not
 
-Where it fails is consistent with everything else here: NORMAL precision drops
-to 0.866, with 93 pneumonia films and 35 COVID films called NORMAL. When this
-model is wrong it is disproportionately wrong in the direction of "nothing
-here".
+`prashant268` has NORMAL, PNEUMONIA and COVID19. It has no lung opacity
+directory at all, while the model has four outputs — so what is a LUNG_OPACITY
+prediction here? There is no answer that is simply correct, and the two
+defensible ones measure different things, so the script reports both:
+
+| clean, 4,887 images | macro F1 | accuracy | COVID19 F1 | NORMAL F1 | PNEUMONIA F1 |
+|---|---|---|---|---|---|
+| open — all four outputs live | 0.9252 | 0.9593 | 0.868 | 0.923 | 0.984 |
+| restricted — absent class masked | 0.9452 | 0.9675 | 0.936 | 0.916 | 0.984 |
+
+**Open** counts a LUNG_OPACITY prediction as wrong, because these labels cannot
+confirm it. That is a lower bound: some of those films may really show an
+opacity this dataset had no category for and filed under something else.
+**Restricted** masks the absent class out of the logits before argmax, so the
+model must choose among the classes the dataset knows — the like-for-like
+against a three-class score. Both average over the same three labelled classes,
+and the JSON records which under `macro_f1_over`.
+
+The gap is **+0.0200**, and it comes from **55 of 4,887 images (1.1%)** where the
+model reached for a class these labels cannot express. Nearly all of them were
+COVID-19 films: masking the class recovers COVID19 F1 from 0.868 to 0.936, and
+its recall from 0.785 to 0.900. Quote both numbers or neither.
+
+Where it fails is consistent with everything else here. Under the restricted
+pass, NORMAL precision drops to 0.889 — 72 pneumonia films and 35 COVID films
+called NORMAL. When this model is wrong it is disproportionately wrong in the
+direction of "nothing here".
+
+Against 0.9587 on the held-out split of its own dataset, the clean number is
+0.9252 open and 0.9452 restricted. Per class it is not strictly like-for-like:
+pneumonia is 74% of this dataset and 6% of the other, so PNEUMONIA F1 rising to
+0.984 says as much about the class balance as about the model.
 
 **This is still not the different-hospitals experiment.** Removing shared
 images removes image-level contamination and nothing else. Both datasets are
-compiled from the same public archives, so much of the clean 4,895 plausibly
+compiled from the same public archives, so much of the clean 4,887 plausibly
 comes from the same collections as the training data — the same Kermany
 pneumonia set, the same BIMCV series. What this establishes is that the model
 does not collapse on unseen images from a differently-assembled download. It
@@ -570,21 +587,26 @@ a hospital outside these datasets is exactly the kind of thing that scores far
 away and gets refused. A false-reject rate measured against images from the same
 four repositories is a floor rather than an estimate.
 
-**How much of a floor was measured — three-class model.** On the clean images of
-a second dataset — see [Scored against a second dataset](#scored-against-a-second-dataset--three-class-model)
-— the refusal rate roughly doubled:
+**How much of a floor is measured.** On the clean images of a second dataset —
+see [Scored against a second dataset](#scored-against-a-second-dataset) — the
+refusal rate rises across every class:
 
-| three-class | same dataset, held out | second dataset, clean |
+| | same dataset, held out | second dataset, clean |
 |---|---|---|
-| COVID19 | 3.7% | 10.3% |
-| NORMAL | 3.9% | 1.8% |
-| PNEUMONIA | 3.5% | 8.6% |
-| pooled | 3.8% | 7.4% |
+| COVID19 | 6.6% | 9.2% |
+| LUNG_OPACITY | 5.1% | — *(not labelled there)* |
+| NORMAL | 4.1% | 7.3% |
+| PNEUMONIA | 6.4% | 6.3% |
+| pooled | 5.0% | 6.7% |
 
-A cutoff calibrated at p95 on one dataset delivers roughly p92 on another, and
+A cutoff calibrated at p95 on one dataset delivers roughly p93 on another, and
 that dataset is not even from different hospitals. **The threshold does not
 travel.** Recalibrate against images from wherever it will actually be used, or
-the check quietly refuses one real film in ten while reporting one in twenty.
+the check refuses more real films than the percentile you set implies.
+
+The effect is milder than it was under the three-class model, where the same
+comparison ran 3.8% to 7.4% pooled. That is because the same-dataset floor rose
+rather than the second-dataset figure falling — see the cutoff table above.
 
 ## Tests
 

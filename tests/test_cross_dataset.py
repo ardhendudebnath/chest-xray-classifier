@@ -13,7 +13,7 @@ import pytest
 import torch
 from PIL import Image, ImageDraw
 
-from src.cross_dataset import label_of, labelled, predict, score_subset
+from src.cross_dataset import absent_classes, label_of, labelled, predict, score_subset
 from src.dataset import CLASSES
 from src.model import load_checkpoint
 
@@ -191,3 +191,150 @@ def test_reencoded_training_images_land_in_the_overlapping_population(tmp_path):
         for path, flag in zip(result["left_paths"], overlapping)
         if not flag
     )
+
+
+# ------------------------------------ scoring against a shorter label set
+
+
+def images_at(tmp_path, count, seed):
+    rng = np.random.default_rng(seed)
+    paths = []
+    for index in range(count):
+        path = tmp_path / f"{index}.png"
+        distinct_image(rng).save(path)
+        paths.append(path)
+    return paths
+
+
+def test_absent_classes_reads_the_labels_not_the_configuration():
+    """The second dataset here has no lung opacity directory at all, and which
+    classes are missing is a property of the download rather than a setting."""
+    labels = np.array([CLASSES.index("NORMAL"), CLASSES.index("PNEUMONIA")])
+
+    missing = [CLASSES[index] for index in absent_classes(labels)]
+
+    assert missing == ["COVID19", "LUNG_OPACITY"]
+
+
+def test_matching_label_sets_leave_nothing_to_restrict():
+    """When the two agree there is no second pass to run, and main skips it."""
+    assert absent_classes(np.arange(len(CLASSES))) == []
+
+
+def test_restricting_keeps_predictions_inside_the_allowed_classes(
+    model_on_cpu, tmp_path
+):
+    model, backbone = model_on_cpu
+    paths = images_at(tmp_path, 8, seed=10)
+    allowed = [CLASSES.index("NORMAL"), CLASSES.index("PNEUMONIA")]
+
+    predictions, _ = predict(model, backbone, paths, CPU, restrict_to=allowed)
+
+    assert set(predictions.tolist()) <= set(allowed)
+
+
+def test_restricting_scores_the_same_images_not_fewer(model_on_cpu, tmp_path):
+    """Masked in the logits rather than by dropping images, so both passes
+    describe the same population and their scores are comparable."""
+    model, backbone = model_on_cpu
+    paths = images_at(tmp_path, 8, seed=11)
+
+    open_predictions, _ = predict(model, backbone, paths, CPU)
+    restricted, _ = predict(
+        model, backbone, paths, CPU, restrict_to=[CLASSES.index("NORMAL")]
+    )
+
+    assert len(open_predictions) == len(restricted) == len(paths)
+
+
+def test_restricting_only_moves_the_predictions_it_has_to(model_on_cpu, tmp_path):
+    """An image the model already placed inside the allowed set must come back
+    unchanged. Anything else would mean the mask is altering the ranking among
+    the classes it left alone, and the restricted pass would stop being a fair
+    reading of the same model."""
+    model, backbone = model_on_cpu
+    paths = images_at(tmp_path, 12, seed=12)
+    allowed = [CLASSES.index("COVID19"), CLASSES.index("NORMAL")]
+
+    open_predictions, _ = predict(model, backbone, paths, CPU)
+    restricted, _ = predict(model, backbone, paths, CPU, restrict_to=allowed)
+
+    for before, after in zip(open_predictions.tolist(), restricted.tolist()):
+        if before in allowed:
+            assert after == before
+
+
+def test_the_open_pass_counts_predictions_the_labels_cannot_express(
+    model_on_cpu, tmp_path
+):
+    """The number that makes the open and restricted scores readable together:
+    how often the model reached for a class this dataset never labels."""
+    model, backbone = model_on_cpu
+    paths = images_at(tmp_path, 10, seed=13)
+    labels = np.full(len(paths), CLASSES.index("NORMAL"))
+
+    result = score_subset(model, backbone, paths, labels, CPU)
+
+    predictions, _ = predict(model, backbone, paths, CPU)
+    expected = {
+        CLASSES[index]: int((predictions == index).sum())
+        for index in absent_classes(labels)
+        if (predictions == index).any()
+    }
+    assert result["predicted_outside_labels"] == expected
+    assert set(result["predicted_outside_labels"]) <= set(CLASSES) - {"NORMAL"}
+
+
+def test_both_passes_average_over_the_same_classes(model_on_cpu, tmp_path):
+    """The two numbers exist to be compared, so they have to be means over the
+    same set. sklearn infers that set from labels-union-predictions when it is
+    not told, which gave the open pass four classes -- it predicts the absent
+    one, scoring 0.000 against zero support -- and the restricted pass three.
+    On the real second dataset that inflated a 0.02 difference into 0.25, all
+    of it denominator."""
+    model, backbone = model_on_cpu
+    paths = images_at(tmp_path, 12, seed=15)
+    labels = np.array([CLASSES.index("NORMAL"), CLASSES.index("PNEUMONIA")] * 6)
+    allowed = [CLASSES.index("NORMAL"), CLASSES.index("PNEUMONIA")]
+
+    opened = score_subset(model, backbone, paths, labels, CPU)
+    restricted = score_subset(model, backbone, paths, labels, CPU, restrict_to=allowed)
+
+    assert opened["macro_f1_over"] == restricted["macro_f1_over"] == [
+        CLASSES[index] for index in allowed
+    ]
+
+
+def test_a_class_the_dataset_never_labels_is_kept_out_of_the_mean(
+    model_on_cpu, tmp_path
+):
+    """Its F1 is 0.000 against zero support, which is an artefact of the label
+    set rather than a fact about the model. It stays visible in per_class_f1
+    and out of the headline average."""
+    model, backbone = model_on_cpu
+    paths = images_at(tmp_path, 8, seed=16)
+    labels = np.full(len(paths), CLASSES.index("NORMAL"))
+
+    result = score_subset(model, backbone, paths, labels, CPU)
+
+    assert result["macro_f1_over"] == ["NORMAL"]
+    assert "LUNG_OPACITY" in result["per_class_f1"]
+    assert result["macro_f1"] == pytest.approx(result["per_class_f1"]["NORMAL"])
+
+
+def test_the_restricted_pass_leaves_nothing_outside_the_labels(
+    model_on_cpu, tmp_path
+):
+    """Zero by construction. Asserted anyway, because it is the property that
+    makes the restricted number a like-for-like against a shorter class list."""
+    model, backbone = model_on_cpu
+    paths = images_at(tmp_path, 10, seed=14)
+    labels = np.full(len(paths), CLASSES.index("NORMAL"))
+
+    result = score_subset(
+        model, backbone, paths, labels, CPU,
+        restrict_to=[CLASSES.index("NORMAL")],
+    )
+
+    assert result["predicted_outside_labels"] == {}
+    assert result["accuracy"] == 1.0

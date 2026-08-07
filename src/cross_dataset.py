@@ -3,7 +3,7 @@
 The whole project rests on numbers from one dataset whose classes are separable
 by provenance, so the obvious next move is to score against a different
 download. Done naively that measures nothing: the public chest X-ray sets
-re-package each other, and `src.dataset_overlap` found that 23.9% of
+re-package each other, and `src.dataset_overlap` found that 24.0% of
 `prashant268/chest-xray-covid19-pneumonia` is already in this model's training
 split -- with zero matching checksums, because every copy had been resized or
 re-encoded on the way in.
@@ -20,8 +20,28 @@ Reporting all three is the point. A single filtered number gives a reader no
 way to check that the filter did anything, and the gap between the first and
 the last is what the contamination was worth.
 
+**When the second dataset has fewer classes than the model.** This one does:
+`prashant268` carries NORMAL, PNEUMONIA and COVID19 and no lung opacity at all,
+while the model has four outputs. So what is a LUNG_OPACITY prediction here?
+There is no answer that is simply correct, and the two defensible ones measure
+different things, so both are reported for the same reason all three
+populations are:
+
+    open        all four outputs live. A LUNG_OPACITY prediction counts as
+                wrong, because these labels cannot confirm it. A lower bound:
+                some of those films may really show an opacity that this
+                dataset had no category for and filed under something else.
+    restricted  the absent classes are masked out of the logits before argmax,
+                so the model must choose among the classes the dataset knows.
+                This is the like-for-like against a three-class score.
+
+The gap between them is how often the model reaches for a class this dataset
+cannot express. Neither number is the honest one on its own: quote `open` and
+you may be charging the model for being right in a vocabulary the labels lack;
+quote `restricted` and you are hiding how often it wanted to say something else.
+
     python -m src.cross_dataset --dataset ~/Downloads/chest-xray-cp/Data \\
-        --exclude-against ~/cxr-data-real/train
+        --exclude-against ~/cxr-data-4class/train
 
 **A filtered score is still not a different-provenance score.** Removing shared
 images removes image-level contamination and nothing else. Both datasets are
@@ -78,12 +98,29 @@ def labelled(paths):
     return kept, np.array(labels, dtype=np.int64), dropped
 
 
-def predict(model, backbone, paths, device, stats=None, batch_size=64):
+def absent_classes(labels):
+    """Class indices the model can predict but this dataset never labels.
+
+    Read off the labels actually found rather than configured, because it is a
+    property of the download in front of us. An empty result means the two
+    label sets line up and the restricted pass has nothing to do.
+    """
+    present = set(int(label) for label in labels)
+    return [index for index in range(len(CLASSES)) if index not in present]
+
+
+def predict(model, backbone, paths, device, stats=None, batch_size=64, restrict_to=None):
     """Returns (predictions, out-of-distribution flags) for a list of images.
 
     The flags are all False when no statistics are given. That is reported as
     "not checked" by the caller rather than folded into the numbers, since a
     detector that never fires and one that was never run look identical here.
+
+    restrict_to limits argmax to those class indices by driving the rest to
+    -inf. Done to the logits rather than by dropping images, so every image is
+    still scored and the two passes cover the same population -- the point is
+    what the model says when it cannot reach for a class this dataset has no
+    label for, not what it says about a smaller set of films.
     """
     transform = build_transforms(train=False)
     predictions, flags = [], []
@@ -99,6 +136,11 @@ def predict(model, backbone, paths, device, stats=None, batch_size=64):
         with torch.no_grad():
             logits, features = forward_with_features(model, backbone, batch)
 
+        if restrict_to is not None:
+            allowed = torch.full((len(CLASSES),), float("-inf"), device=logits.device)
+            allowed[list(restrict_to)] = 0.0
+            logits = logits + allowed
+
         predictions.append(logits.argmax(dim=1).cpu().numpy())
         if stats is not None:
             flags.append(is_out_of_distribution(*score(features.cpu().numpy(), stats), stats))
@@ -112,19 +154,47 @@ def predict(model, backbone, paths, device, stats=None, batch_size=64):
     )
 
 
-def score_subset(model, backbone, paths, labels, device, stats=None, batch_size=64):
+def score_subset(
+    model, backbone, paths, labels, device, stats=None, batch_size=64, restrict_to=None
+):
     """Metrics for one population. Returns a dict, or None when it is empty."""
     if len(paths) == 0:
         return None
 
-    predictions, flags = predict(model, backbone, paths, device, stats, batch_size)
+    predictions, flags = predict(
+        model, backbone, paths, device, stats, batch_size, restrict_to
+    )
     matrix = confusion_matrix(labels, predictions, labels=range(len(CLASSES)))
+
+    # Average over the classes this dataset labels, and say so, rather than
+    # letting sklearn infer the set from labels-union-predictions. Inferred, the
+    # open pass averages over four classes -- it predicts LUNG_OPACITY, which
+    # scores 0.000 against zero support -- while the restricted pass averages
+    # over three. That put a 0.25 gap between two numbers whose real difference
+    # was 0.02, entirely from the denominator, and the two passes exist to be
+    # compared. Predicting outside the label set is still charged for: it costs
+    # the true class its recall, which these classes' scores do see.
+    present = [index for index in range(len(CLASSES)) if index not in absent_classes(labels)]
 
     result = {
         "images": len(paths),
+        # How many landed in a class this dataset never labels. Zero by
+        # construction under restrict_to; the number worth reading is the one
+        # from the open pass.
+        "predicted_outside_labels": {
+            CLASSES[index]: int((predictions == index).sum())
+            for index in absent_classes(labels)
+            if (predictions == index).any()
+        },
         "accuracy": float(accuracy_score(labels, predictions)),
-        "macro_f1": float(f1_score(labels, predictions, average="macro", zero_division=0)),
+        "macro_f1": float(
+            f1_score(labels, predictions, average="macro", labels=present, zero_division=0)
+        ),
+        # Named so nobody has to work out what the average ran over.
+        "macro_f1_over": [CLASSES[index] for index in present],
         "confusion_matrix": matrix.tolist(),
+        # Per class over all four regardless, because a zero against a class
+        # with no support is information: it says the dataset never labels it.
         "per_class_f1": {
             name: float(value)
             for name, value in zip(
@@ -133,8 +203,9 @@ def score_subset(model, backbone, paths, labels, device, stats=None, batch_size=
             )
         },
         "report": classification_report(
-            labels, predictions, labels=range(len(CLASSES)),
-            target_names=CLASSES, digits=3, zero_division=0,
+            labels, predictions, labels=present,
+            target_names=[CLASSES[index] for index in present],
+            digits=3, zero_division=0,
         ),
     }
 
@@ -158,10 +229,24 @@ def print_subset(title, result):
     print(result["report"])
     print(f"macro F1 {result['macro_f1']:.4f}   accuracy {result['accuracy']:.4f}")
 
+    # Width derived from the class names rather than fixed, for the reason
+    # src.evaluate carries the same note: a name as long as the column fills it
+    # edge to edge and fuses with its neighbour in the header.
+    width = max(len(name) for name in CLASSES) + 2
     print("\nconfusion (rows actual, cols predicted)")
-    print(" " * 12 + "".join(f"{name:>12}" for name in CLASSES))
+    print(" " * width + "".join(f"{name:>{width}}" for name in CLASSES))
     for name, row in zip(CLASSES, result["confusion_matrix"]):
-        print(f"{name:<12}" + "".join(f"{value:>12}" for value in row))
+        print(f"{name:<{width}}" + "".join(f"{value:>{width}}" for value in row))
+
+    outside = result.get("predicted_outside_labels")
+    if outside:
+        total = sum(outside.values())
+        detail = ", ".join(f"{name} {count}" for name, count in outside.items())
+        print(
+            f"\n{total} of {result['images']} images ({total / result['images']:.1%}) "
+            f"were predicted into a class this dataset never labels: {detail}."
+        )
+        print("Counted as errors above. The restricted pass below removes them.")
 
     if "ood_refused" in result:
         print("\nout-of-distribution check -- real X-rays refused")
@@ -230,6 +315,14 @@ def main():
                   "C. CLEAN -- training images removed, the honest number"),
     }
 
+    missing = absent_classes(labels)
+    if missing:
+        print(
+            f"this dataset never labels {[CLASSES[i] for i in missing]}, which the "
+            f"model can still predict -- scoring both open and restricted"
+        )
+    allowed = [index for index in range(len(CLASSES)) if index not in missing]
+
     metrics = {}
     for key, (mask, title) in populations.items():
         chosen = [paths[i] for i in np.flatnonzero(mask)]
@@ -238,9 +331,32 @@ def main():
         )
         print_subset(title, metrics[key])
 
+        # Second pass over the same images with the absent classes masked out
+        # of the logits. Skipped entirely when the label sets already agree,
+        # because then it is the same computation twice.
+        if missing:
+            metrics[f"{key}_restricted"] = score_subset(
+                model, backbone, chosen, labels[mask], device, stats,
+                args.batch_size, restrict_to=allowed,
+            )
+            print_subset(f"{title}  [RESTRICTED to the dataset's classes]",
+                         metrics[f"{key}_restricted"])
+
     if metrics["clean"] and metrics["all"]:
         gap = metrics["all"]["macro_f1"] - metrics["clean"]["macro_f1"]
         print(f"\ncontamination was worth {gap:+.4f} macro F1")
+
+    if missing and metrics.get("clean") and metrics.get("clean_restricted"):
+        open_f1 = metrics["clean"]["macro_f1"]
+        restricted_f1 = metrics["clean_restricted"]["macro_f1"]
+        print(
+            f"clean macro F1: {open_f1:.4f} open, {restricted_f1:.4f} restricted "
+            f"({restricted_f1 - open_f1:+.4f})"
+        )
+        print(
+            "The gap is what the model wanted to say and these labels could not "
+            "express. Quote both or neither."
+        )
 
     print(
         "\nA filtered score is not a different-provenance score. These datasets "
