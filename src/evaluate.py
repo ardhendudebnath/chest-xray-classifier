@@ -50,13 +50,21 @@ def collect_predictions(model, loader, device):
 
 
 def print_confusion(matrix):
-    """Rows are the truth, columns are what the model said."""
+    """Rows are the truth, columns are what the model said.
+
+    One width, derived from the longest class name, for the row labels and the
+    columns alike. The column width used to be a hardcoded 12, which was fine
+    until LUNG_OPACITY arrived at exactly 12 characters and filled its field
+    edge to edge -- the header printed COVID19LUNG_OPACITY with the two names
+    fused, and stayed that way for a whole release. Deriving it means the next
+    class to be added cannot do the same thing.
+    """
     width = max(len(name) for name in CLASSES) + 2
-    header = " " * width + "".join(f"{name:>12}" for name in CLASSES)
+    header = " " * width + "".join(f"{name:>{width}}" for name in CLASSES)
     print("\nconfusion matrix (rows = actual, cols = predicted)")
     print(header)
     for name, row in zip(CLASSES, matrix):
-        print(f"{name:<{width}}" + "".join(f"{value:>12}" for value in row))
+        print(f"{name:<{width}}" + "".join(f"{value:>{width}}" for value in row))
 
 
 def save_confusion_plot(matrix, path):
