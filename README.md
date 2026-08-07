@@ -279,52 +279,58 @@ The confusion is real either way. The difference is that it is now on the
 confusion matrix instead of inside the NORMAL column, so the drop is a failure
 becoming visible rather than one being introduced.
 
-### The lung-masking check — three-class model
+### The lung-masking check
 
-**These numbers come from the superseded three-class model and have not been
-re-measured since LUNG_OPACITY was added.** They are kept because what they
-establish is a property of the dataset rather than of the class list, and
-re-running costs a full two-stage train. Do not read them beside the table
-above as if both describe the same model.
-
-| three-class | macro F1 | accuracy | COVID19 F1 | NORMAL F1 | PNEUMONIA F1 |
-|---|---|---|---|---|---|
-| as downloaded | 0.9816 | 0.9894 | 0.993 | 0.992 | 0.960 |
-| lungs only    | 0.9615 | 0.9718 | 0.961 | 0.979 | 0.945 |
+| four-class | macro F1 | accuracy | COVID19 F1 | LUNG_OPACITY F1 | NORMAL F1 | PNEUMONIA F1 |
+|---|---|---|---|---|---|---|
+| as downloaded | 0.9587 | 0.9524 | 0.982 | 0.929 | 0.953 | 0.970 |
+| lungs only    | 0.9341 | 0.9298 | 0.926 | 0.899 | 0.944 | 0.967 |
 
 The second row is the same recipe trained on a mirror of the same split with
 every non-lung pixel zeroed. Roughly 77% of each image is removed, including all
 burned-in markers, collimation edges, soft tissue and background. The score fell
-by two points rather than collapsing. To reproduce it:
+by two and a half points rather than collapsing. To reproduce it:
 
 ```bash
-~/venvs/smt/Scripts/python.exe -m src.mask_lungs --split-root data --source ~/Downloads/COVID-19_Radiography_Dataset --out data-masked
-~/venvs/smt/Scripts/python.exe -m src.train --epochs 15 --freeze-backbone --data-dir data-masked --out checkpoints/masked_stage1.pt
-~/venvs/smt/Scripts/python.exe -m src.train --epochs 25 --lr 1e-4 --data-dir data-masked --resume checkpoints/masked_stage1.pt --out checkpoints/masked_best.pt
-~/venvs/smt/Scripts/python.exe -m src.evaluate --checkpoint checkpoints/masked_best.pt --split test --data-dir data-masked
+~/venvs/smt/Scripts/python.exe -m src.mask_lungs --split-root ~/cxr-data-4class --source ~/Downloads/covid19-radiography/COVID-19_Radiography_Dataset --out ~/cxr-data-4class-masked
+~/venvs/smt/Scripts/python.exe -m src.train --epochs 15 --freeze-backbone --num-workers 4 --data-dir ~/cxr-data-4class-masked --out checkpoints/masked_stage1.pt
+~/venvs/smt/Scripts/python.exe -m src.train --epochs 25 --lr 1e-4 --num-workers 4 --data-dir ~/cxr-data-4class-masked --resume checkpoints/masked_stage1.pt --out checkpoints/masked_best.pt
+~/venvs/smt/Scripts/python.exe -m src.evaluate --checkpoint checkpoints/masked_best.pt --split test --data-dir ~/cxr-data-4class-masked --report-dir reports/masked_4class
 ```
 
 It mirrors an existing split rather than re-splitting, so the two runs differ in
 exactly one variable. Masks ship with the Radiography Database, for all four
-classes; most other downloads have none.
-
-Those commands run against the current code, so they would now produce the
-four-class version of this experiment rather than the numbers in the table —
-which is the re-measurement, not a reproduction of it.
+classes; most other downloads have none. Pass `--report-dir`, or the evaluation
+overwrites the unmasked run's saved metrics.
 
 What that establishes, and what it does not:
 
 - It **rules out** the crude shortcut. The model is not reading annotations or
-  background, because those are gone and it still scores 0.96.
+  background, because those are gone and it still scores 0.93.
 - It **does not clear** the provenance confound. Acquisition signature survives
   inside lung pixels, and so does the lung silhouette — a child's lungs are
   shaped differently from an adult's, and Viral Pneumonia here is the paediatric
   Kermany collection while COVID-19 is adult European patients.
 
-One detail argues that part of the original score *was* artifact: COVID-19 lost
-roughly twice what the other classes did (−0.032 against −0.013 and −0.015),
-and its recall fell 0.989 → 0.946. COVID-19 is the only class with unique
-provenance, so it is the class with the most artifact to lose.
+One detail argues that part of the original score *was* artifact, and it is the
+clearest signal in this table. Masking costs the four classes wildly different
+amounts:
+
+| | COVID19 | LUNG_OPACITY | NORMAL | PNEUMONIA |
+|---|---|---|---|---|
+| F1 lost to masking | −0.056 | −0.030 | −0.009 | −0.003 |
+
+COVID-19 loses six times what NORMAL does and nearly twenty times what pneumonia
+does, and its recall falls 0.976 → 0.911. It is the only class with unique
+provenance, so it is the class with the most artifact to lose. The three-class
+version of this experiment found the same thing at half the magnitude (−0.032
+against −0.013 and −0.015), so the effect has now reproduced across two
+different class lists.
+
+LUNG_OPACITY, measured this way for the first time, sits mid-table. It loses
+more than NORMAL or PNEUMONIA and less than half what COVID-19 does, which is
+what you would expect from a class drawn from the same repositories as NORMAL
+rather than carrying a provenance signature of its own.
 
 Nothing internal to this dataset can settle it, because the correlation is
 total by construction. That needs a COVID-19 set from different hospitals,
