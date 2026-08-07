@@ -92,6 +92,25 @@ def start_model(args, device):
     return model, backbone
 
 
+def history_path_for(out):
+    """Where this run's per-epoch history goes, named after its checkpoint.
+
+        checkpoints/best.pt         -> checkpoints/best_history.json
+        checkpoints/masked_best.pt  -> checkpoints/masked_best_history.json
+
+    Derived from --out rather than fixed, because a fixed name means every run
+    into one directory overwrites the last one's curve. That fails at the very
+    end, silently, once the epochs it recorded are already spent -- a masked
+    run destroyed the unmasked four-class model's 25-epoch stage 2 exactly this
+    way, and checkpoints/ is gitignored, so there was nothing to recover from.
+
+    The two-stage recipe is two runs into one directory by design, so this is
+    the ordinary case rather than the careless one.
+    """
+    out = Path(out)
+    return out.with_name(f"{out.stem}_history.json")
+
+
 def run_epoch(model, loader, criterion, device, optimizer=None):
     """One pass over a loader. Passing an optimizer makes it a training pass."""
     training = optimizer is not None
@@ -249,7 +268,8 @@ def main():
                 print(f"no improvement in {args.patience} epochs, stopping early")
                 break
 
-    history_path = Path(args.out).with_name("history.json")
+    history_path = history_path_for(args.out)
+    history_path.parent.mkdir(parents=True, exist_ok=True)
     history_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
 
     print(f"\nbest val macro F1: {best_f1:.4f}")
