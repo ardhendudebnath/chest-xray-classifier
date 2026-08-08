@@ -40,6 +40,83 @@ usual:
 
 Grad-CAM is included for exactly this reason. It is not decoration.
 
+## At a glance
+
+resnet18, two-stage fine-tuning, 21,165 images from the COVID-19 Radiography
+Database split 70/15/15 by patient group. Roughly half this repository is the
+model; the other half is the machinery for deciding whether its numbers mean
+anything.
+
+### How a number gets made
+
+```mermaid
+flowchart TD
+    DL["COVID-19 Radiography Database<br/>21,165 images, 4 classes"]
+    DL --> PD["src.prepare_data<br/>alias class names, keep a patient in one split"]
+    PD --> SPLIT["train 14,814 · val 3,176 · test 3,175"]
+    SPLIT --> T1["src.train --freeze-backbone<br/>stage 1, head only"]
+    T1 --> T2["src.train --resume --lr 1e-4<br/>stage 2, whole network"]
+    T2 --> CKPT["checkpoints/best.pt<br/>selected on val macro F1"]
+    SPLIT --> OOD["src.ood<br/>fit one Gaussian per class, cutoffs at p95"]
+    CKPT --> OOD
+    OOD --> STATS["checkpoints/ood.pt"]
+    CKPT --> EV["src.evaluate<br/>per-class F1 and confusion matrix"]
+    CKPT --> API["app.main<br/>/predict · /explain · /health"]
+    STATS --> API
+    API --> FE["frontend<br/>PWA, class list read from /health"]
+```
+
+### Why softmax cannot say "none of the above"
+
+One forward pass, two answers taken from different depths. The top path always
+returns a class, whatever it is handed. Only the bottom path can decline.
+
+```mermaid
+flowchart LR
+    IMG["any image at all"] --> TF["greyscale, resize to 224"]
+    TF --> BB["resnet18 backbone"]
+    BB --> FEAT["512 features<br/>what does this look like at all"]
+    FEAT --> HEAD["4-class head"]
+    HEAD --> LOGITS["4 logits<br/>how much like each class"]
+    LOGITS --> SM["softmax"]
+    SM --> PRED["prediction + confidence<br/>always answers"]
+    FEAT --> MAH["Mahalanobis distance<br/>to the nearest class mean"]
+    MAH --> CUT["past that class's cutoff?<br/>can refuse"]
+```
+
+A flat grey square comes back COVID19 at 99.4% with `low_confidence` unflagged.
+The distance check refuses it, and the other five probes, at 1,594 to 21,485
+against a cutoff of 939.8.
+
+### Results
+
+| four-class, 3,175 test images | macro F1 | accuracy |
+|---|---|---|
+| as downloaded | 0.9587 | 0.9524 |
+| lungs only, 77% of each image masked | 0.9341 | 0.9298 |
+| second dataset, clean, restricted | 0.9452 | 0.9675 |
+
+**Do not quote any of these alone.** The classes are 100% separable by
+provenance, so a high score is what a model would produce by learning which
+repository an image came from. The rest of this file is largely about that.
+
+### What the machinery establishes
+
+| question | answered by | finding |
+|---|---|---|
+| Does it read lungs or artifacts? | `src.mask_lungs` | Masking costs COVID-19 −0.056 F1 against NORMAL's −0.009. It is the only class with unique provenance, so it has the most artifact to lose. |
+| Is the second dataset different data? | `src.dataset_overlap` | 24.0% of it is already in the training split, and **zero** of those match by checksum — every copy was re-encoded on the way in. |
+| Does it hold up off-dataset? | `src.cross_dataset` | 0.9452 macro F1 on the clean remainder, after the shared images are removed and reported separately. |
+| Does the refusal check still work? | `src.probe_ood` | All six non-radiographs refused; all six still called COVID19 above 98.7% by the softmax. |
+| What did NORMAL used to hide? | the class list itself | The three-class model called lung opacity films NORMAL 94.2% of the time at 0.972 confidence. Adding the class moved that error onto the confusion matrix. |
+
+### Where to look
+
+- Numbers and what they cost: [Results](#results)
+- The provenance problem, measured: [The lung-masking check](#the-lung-masking-check)
+- Off-dataset scoring: [Scored against a second dataset](#scored-against-a-second-dataset)
+- Refusing non-radiographs: [Is it even a chest X-ray?](#is-it-even-a-chest-x-ray)
+
 ## Layout
 
 ```
