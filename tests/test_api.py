@@ -299,3 +299,49 @@ def test_explain_rejects_an_unknown_class(client, png_bytes):
         files={"file": ("xray.png", png_bytes, "image/png")},
     )
     assert response.status_code == 400
+
+
+# ------------------------------------------------- serving the page as well
+
+
+def test_the_frontend_is_not_served_unless_asked(client):
+    """Two servers is the better arrangement locally, so it stays the default.
+    A mount appearing on its own would also mean the mount below had been
+    registered, and with it the risk it swallows the API."""
+    assert client.get("/").status_code == 404
+
+
+def test_the_api_still_answers_with_the_page_mounted(monkeypatch, checkpoint):
+    """The mount is at "/", which matches every path beneath it. Registered
+    before the routes rather than after, it would swallow /health and /predict
+    and the container would serve a working page attached to nothing."""
+    monkeypatch.setenv("CXR_SERVE_FRONTEND", "1")
+    module = load_app(monkeypatch, checkpoint)
+
+    with TestClient(module.app) as test_client:
+        health = test_client.get("/health")
+        assert health.status_code == 200
+        assert health.json()["classes"] == CLASSES
+
+        page = test_client.get("/")
+        assert page.status_code == 200
+        assert "text/html" in page.headers["content-type"]
+
+        # The page reads its class list from /health, so shipping them from one
+        # process is only safe while that request still reaches the API.
+        assert test_client.get("/app.js").status_code == 200
+
+
+def test_a_missing_frontend_directory_does_not_stop_the_api(
+    monkeypatch, checkpoint, tmp_path
+):
+    """The deployment copies frontend/ in. If that step is ever missed, the
+    API has to keep serving -- an API with no page is recoverable, a container
+    that will not start is not."""
+    monkeypatch.setenv("CXR_SERVE_FRONTEND", "1")
+    monkeypatch.chdir(tmp_path)
+    module = load_app(monkeypatch, checkpoint)
+    monkeypatch.setattr(module, "FRONTEND_DIR", tmp_path / "no-frontend-here", raising=False)
+
+    with TestClient(module.app) as test_client:
+        assert test_client.get("/health").status_code == 200

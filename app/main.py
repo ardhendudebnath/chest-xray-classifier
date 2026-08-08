@@ -20,6 +20,7 @@ question was not asked rather than answered in the negative.
 import io
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import torch
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -278,3 +279,22 @@ async def explain(file: UploadFile = File(...), class_name: str = None):
             "X-Disclaimer": DISCLAIMER,
         },
     )
+
+
+# Serving the page from this process is off by default and opt-in through the
+# environment. Locally the two run separately -- the API on 8100 and the page on
+# 5501 -- so either can be restarted without the other, which is worth having
+# while editing. A single-container deployment has nowhere to put a second
+# server, and there this is the whole point.
+#
+# Mounted last, and only last. A mount at "/" matches every path under it, so
+# registering it before the routes above would swallow /predict and /health.
+if os.getenv("CXR_SERVE_FRONTEND"):
+    from fastapi.staticfiles import StaticFiles
+
+    FRONTEND_DIR = Path(__file__).resolve().parents[1] / "frontend"
+    if FRONTEND_DIR.is_dir():
+        app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+        print(f"serving the frontend from {FRONTEND_DIR}")
+    else:
+        print(f"CXR_SERVE_FRONTEND is set but {FRONTEND_DIR} does not exist")

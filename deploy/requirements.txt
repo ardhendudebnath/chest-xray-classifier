@@ -1,0 +1,32 @@
+# Serving only. Deliberately shorter than the project's requirements.txt, since
+# every line here is weight in a container image that has to build on a free
+# Space.
+#
+# Installed from the CPU index -- see the Dockerfile. Spaces have no GPU on the
+# free tier, and resnet18 inference on one 224x224 image is a few tens of
+# milliseconds on a CPU anyway.
+
+torch>=2.7
+torchvision>=0.22
+
+numpy>=1.26
+pillow>=10.2
+
+# Needed, despite being absent from the imports at the top of any serving
+# module. src/gradcam_utils.py imports colormaps inside the function that
+# colours the heatmap, so /explain fails at request time without it rather than
+# at startup.
+matplotlib>=3.8
+
+fastapi>=0.110
+uvicorn>=0.27
+python-multipart>=0.0.9   # required for UploadFile
+
+# Not here on purpose:
+#   scikit-learn  only src.ood's fit path uses it, through a function-level
+#                 import of LedoitWolf. Scoring against fitted statistics,
+#                 which is all the API does, never reaches it.
+#   kaggle        downloads datasets; a Space has none to download.
+#   matplotlib's  Agg backend is the default in a headless container, so no
+#                 display packages are needed beyond the above.
+#   pytest, jupyter, tqdm
