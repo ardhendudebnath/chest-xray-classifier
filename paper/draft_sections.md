@@ -5,6 +5,24 @@ section below states what was wrong and gives replacement prose. Every number
 is traceable to a file under `reports/` — the provenance is given beside each
 table so nothing here has to be taken on trust.
 
+## What is in this directory
+
+| File | What it is |
+|---|---|
+| `draft_sections.md` | This file. The corrected prose, section by section, with the reasoning for each change. Edit here first. |
+| `Explainable_ChestXray_Paper_IJSR.docx` | Submission format: A4, two columns, IJSR margins and styles. Built from `IJSR_PaperFormat.docx`, with the wide tables transposed or split to fit a 3.42in column. |
+| `Explainable_ChestXray_Paper_singlecolumn.docx` | The same content in a plain single-column Letter layout. Easier to read and mark up; not a submission format. |
+
+Both `.docx` files were generated from the content below, so **this file is the
+source of truth** — change it, then regenerate, rather than editing the Word
+documents and letting the two drift apart.
+
+Neither has been visually proofed: the machine they were built on has no
+LibreOffice, so table wrapping and column balance are unverified. Open the IJSR
+one and check the wider tables before submitting. Two things are deliberately
+absent because they cannot be invented: a contact email in the author block,
+and the Author Profile section the IJSR template ends with.
+
 **Reproduce every number in this document:**
 
 ```bash
