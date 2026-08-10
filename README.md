@@ -107,6 +107,7 @@ against a cutoff of 939.8.
 |---|---|---|
 | as downloaded | 0.9587 | 0.9524 |
 | the same with resnet50, 2.1x the parameters | 0.9576 | 0.9512 |
+| *(both are single runs — three seeds each put them 0.93 sd apart)* | | |
 | lungs only, 77% of each image masked | 0.9341 | 0.9298 |
 | second dataset, clean, restricted | 0.9452 | 0.9675 |
 
@@ -127,7 +128,7 @@ repository an image came from. The rest of this file is largely about that.
 | Is the heat in the lungs? | `src.xai_eval` | Enrichment 1.359 (resnet18) and 1.274 (resnet50) over a uniform map. Modest, and it is lung-field mass rather than pathology IoU. |
 | Is there a short list of features behind a decision? | `src.shap_utils` | No. The top 15 carry 15.1% of the movement on resnet18, 14.2% on resnet50. |
 | Do these explanation scores compare across models? | `src.xai_eval` | Not raw. The random controls differ (0.44 vs 0.27) and cosine falls with dimension, so only gaps and ratios transfer. |
-| Does a bigger backbone help? | `--backbone resnet50` | No. 2.1x the parameters moves macro F1 by −0.0011, which is what you would expect if the shortcut were already exhausted. |
+| Does a bigger backbone help? | `--backbone resnet50`, 3 seeds each | No. 2.1x the parameters is worth −0.0023 macro F1 against a pooled sd of 0.0025 — inside the noise, and it doubles the run-to-run spread. |
 
 ### Where to look
 
@@ -524,20 +525,58 @@ two-stage recipe above. Test set, 3,175 images:
 | resnet18, as downloaded | 0.9587 | 0.9524 | 0.9928 | 0.982 | 0.929 | 0.953 | 0.970 |
 | resnet50, as downloaded | 0.9576 | 0.9512 | 0.9937 | 0.982 | 0.925 | 0.952 | 0.970 |
 
-**resnet50 buys nothing.** 2.1x the parameters (23.52M against 11.18M) moves
-macro F1 by −0.0011 and macro AUC by +0.0009, in opposite directions, and
-leaves COVID19 and PNEUMONIA F1 identical to three places. Both differences are
-an order of magnitude smaller than what masking the lungs costs. Each
-configuration was trained once, so that is not a significance claim — but the
-straightforward reading is that if a large part of the score is available from
-acquisition signature, the smaller network has already taken it and extra
-capacity has nothing left to buy. Reproduce with:
+Those two rows are single runs, and comparing them directly is a trap. Three
+seeds of each, identical recipe, varying only `--seed`:
+
+| macro F1 | seed 42 | seed 1 | seed 2 | mean | sd | range |
+|---|---|---|---|---|---|---|
+| resnet18 | 0.9587 | 0.9570 | 0.9556 | **0.9571** | 0.0016 | 0.0031 |
+| resnet50 | 0.9576 | 0.9510 | 0.9558 | **0.9548** | 0.0034 | 0.0065 |
+
+**resnet50 buys nothing, and the seeds are what let that be said.** The means
+differ by −0.0023 against a pooled sd of 0.0025 — 0.93 standard deviations,
+with the ranges overlapping heavily — so the difference is not distinguishable
+from run-to-run noise. For scale, masking the lungs moves macro F1 by 0.0246,
+ten times further.
+
+**Compare the seed-42 runs alone and you get −0.0011, less than half that**,
+because that resnet18 run is the best of its three and that resnet50 run the
+best of its three. Depending on which pair you happened to train, the sign
+could come out either way. This paragraph previously quoted that single-run
+figure; it was out by a factor of two, and the seed study is the only reason
+that is known.
+
+Two things do survive. **resnet50 is twice as unstable** — sd 0.0034 against
+0.0016 — so the larger model is more dependent on initialisation, the opposite
+of what capacity is meant to buy. And **every resnet50 run beats every
+resnet18 run on macro AUC** (0.9930–0.9937 against 0.9919–0.9928, no overlap)
+while macro F1 shows no separation at all. It ranks better and decides no
+better, which is the same split that shows up under masking, where AUC falls
+eight times less than F1.
+
+The straightforward reading of the flat capacity curve: if a large part of the
+score is available from acquisition signature, the smaller network has already
+taken it and extra capacity has nothing left to buy. Reproduce with:
 
 ```bash
 ~/venvs/smt/Scripts/python.exe -m src.train --epochs 15 --freeze-backbone --num-workers 4 --backbone resnet50 --data-dir ~/cxr-data-4class --out checkpoints/r50_stage1.pt
 ~/venvs/smt/Scripts/python.exe -m src.train --epochs 25 --lr 1e-4 --num-workers 4 --data-dir ~/cxr-data-4class --resume checkpoints/r50_stage1.pt --out checkpoints/r50_best.pt
 ~/venvs/smt/Scripts/python.exe -m src.evaluate --checkpoint checkpoints/r50_best.pt --data-dir ~/cxr-data-4class --split test --report-dir reports/resnet50
 ```
+
+For another seed, pass `--seed` to **both** stages and give every artefact its
+own name — the recipe is otherwise identical:
+
+```bash
+~/venvs/smt/Scripts/python.exe -m src.train --epochs 15 --freeze-backbone --num-workers 4 --data-dir ~/cxr-data-4class --seed 1 --out checkpoints/seed1_stage1.pt
+~/venvs/smt/Scripts/python.exe -m src.train --epochs 25 --lr 1e-4 --num-workers 4 --data-dir ~/cxr-data-4class --seed 1 --resume checkpoints/seed1_stage1.pt --out checkpoints/seed1_best.pt
+~/venvs/smt/Scripts/python.exe -m src.evaluate --checkpoint checkpoints/seed1_best.pt --data-dir ~/cxr-data-4class --split test --report-dir reports/seed1
+```
+
+`--seed` moves the head initialisation, the sampler draws and the augmentation
+order. It does **not** move the split, which `prepare_data` already fixed on
+disk — so this measures training-run variance on one partition, not the wider
+variance you would get from redrawing the split as well.
 
 Per-class one-vs-rest AUC, resnet18: COVID19 0.9993, LUNG_OPACITY 0.9858,
 NORMAL 0.9870, PNEUMONIA 0.9992. AUC is threshold-free, so it asks whether the model *ranks*

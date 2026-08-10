@@ -13,6 +13,21 @@ table so nothing here has to be taken on trust.
 ~/venvs/smt/Scripts/python.exe -m src.evaluate --checkpoint checkpoints/masked_best.pt --data-dir ~/cxr-data-4class-masked --split test --report-dir reports/masked_4class
 ```
 
+The seed study of §4.2. `--seed` goes to **both** stages; every other argument
+is identical to the runs above. Seed 42 is the default and is the checkpoint
+already trained:
+
+```bash
+for S in 1 2; do
+  ~/venvs/smt/Scripts/python.exe -m src.train --epochs 15 --freeze-backbone --num-workers 4 --data-dir ~/cxr-data-4class --seed $S --out checkpoints/seed${S}_stage1.pt
+  ~/venvs/smt/Scripts/python.exe -m src.train --epochs 25 --lr 1e-4 --num-workers 4 --data-dir ~/cxr-data-4class --seed $S --resume checkpoints/seed${S}_stage1.pt --out checkpoints/seed${S}_best.pt
+  ~/venvs/smt/Scripts/python.exe -m src.evaluate --checkpoint checkpoints/seed${S}_best.pt --data-dir ~/cxr-data-4class --split test --report-dir reports/seed$S
+done
+```
+
+Add `--backbone resnet50` to the first line and rename the artefacts for the
+ResNet50 arm.
+
 Explanation fidelity, per backbone. Both use the default `--seed 0`, which is
 what makes them score the identical 200 images under identical controls:
 
@@ -52,19 +67,22 @@ established.
 > We train ResNet18 and ResNet50 classifiers on the COVID-19 Radiography
 > Database (21,165 images; four classes: normal, pneumonia, COVID-19, lung
 > opacity) using a two-stage fine-tuning schedule and a patient-grouped
-> 70/15/15 split. Both reach a macro F1 of approximately 0.958 (ResNet18
-> 0.9587, ResNet50 0.9576) and a macro one-vs-rest AUC of approximately 0.993.
-> SHAP values are computed in closed form over the network's penultimate
-> features, which is exact for a linear classification head and is verified
-> against the reference implementation.
+> 70/15/15 split, three seeds each. Macro F1 is 0.9571 +/- 0.0016 for ResNet18
+> and 0.9548 +/- 0.0034 for ResNet50 — a 2.1x increase in parameters that is
+> indistinguishable from seed noise and doubles the run-to-run variance. SHAP
+> values are computed in closed form over the network's penultimate features,
+> which is exact for a linear classification head and is verified against the
+> reference implementation.
 >
 > Three measurements qualify these results. First, the dataset's classes are
 > completely separable by source archive before any lung is examined, and
 > retraining on lung-masked images — 77% of each image removed — costs COVID-19
 > six times the F1 it costs the normal class, identifying acquisition signature
 > rather than pathology as a substantial part of what was learned. Second,
-> increasing backbone capacity by 2.3x changes macro F1 by −0.0011, which is
-> what one expects when a shortcut has already been fully exploited. Third, and
+> increasing backbone capacity by 2.1x produces no change distinguishable from
+> seed noise across three runs per backbone, and doubles the run-to-run
+> variance, which is what one expects when a shortcut has already been fully
+> exploited. Third, and
 > most importantly for the XAI claim, neither explanation detects any of this:
 > Grad-CAM produces anatomically plausible maps regardless, and SHAP measures
 > deviation from a training-set mean that carries the same confound.
@@ -333,8 +351,14 @@ the Radiography Database segment *lungs*, not findings.
 >
 > | Backbone | Params | Macro F1 | Accuracy | Macro AUC | Macro precision | Macro recall |
 > |---|---|---|---|---|---|---|
-> | ResNet18 | 11.18M | **0.9587** | 0.9524 | 0.9928 | 0.9640 | 0.9536 |
-> | ResNet50 | 23.52M | 0.9576 | 0.9512 | **0.9937** | 0.9630 | 0.9527 |
+> | ResNet18 | 11.18M | 0.9587 | 0.9524 | 0.9928 | 0.9640 | 0.9536 |
+> | ResNet50 | 23.52M | 0.9576 | 0.9512 | 0.9937 | 0.9630 | 0.9527 |
+>
+> **These are single runs at seed 42**, and are the checkpoints every subsequent
+> section analyses, so the per-class breakdown and the explanation metrics all
+> refer to these two specific models. §4.2 reports three seeds per backbone and
+> should be consulted before any two numbers in this table are compared: the
+> run-to-run spread is larger than the difference between the rows.
 >
 > **Table 3. Per-class results.**
 >
@@ -360,18 +384,65 @@ the Radiography Database segment *lungs*, not findings.
 
 ## §4.2 Results — capacity ablation (new section)
 
-> Increasing the backbone from ResNet18 to ResNet50 — a 2.1x increase in
-> parameters — changes macro F1 by **−0.0011** and macro AUC by **+0.0009**.
-> Per-class F1 is identical to three decimal places for COVID19 and PNEUMONIA.
-> Both differences are an order of magnitude smaller than the 0.0246 macro-F1
-> effect the masking ablation produces in §4.5, so whatever separates the two
-> backbones is negligible beside what separates lungs from image margins.
+> Each configuration was trained three times under the identical two-stage
+> recipe, varying only the seed, which governs head initialisation, sampler
+> draws and augmentation order. The train/validation/test partition is fixed on
+> disk and is therefore *not* resampled, so what follows is training-run
+> variance on one split.
 >
-> We did not run a seed-variance study, and therefore do not claim these
-> differences are statistically indistinguishable from zero — only that they are
-> small, and small in both directions. Repeating each configuration across
-> several seeds is a straightforward addition and would let the comparison carry
-> a significance claim it currently cannot.
+> **Table 3b. Three seeds per backbone, test split.**
+>
+> | | seed 42 | seed 1 | seed 2 | Mean | SD | Range |
+> |---|---|---|---|---|---|---|
+> | ResNet18 macro F1 | 0.9587 | 0.9570 | 0.9556 | **0.9571** | 0.0016 | 0.0031 |
+> | ResNet50 macro F1 | 0.9576 | 0.9510 | 0.9558 | **0.9548** | 0.0034 | 0.0065 |
+> | ResNet18 macro AUC | 0.9928 | 0.9926 | 0.9919 | 0.9924 | — | — |
+> | ResNet50 macro AUC | 0.9937 | 0.9930 | 0.9934 | **0.9933** | — | — |
+>
+> **The capacity difference is not distinguishable from seed noise.** The means
+> differ by −0.0023 macro F1 against a pooled standard deviation of 0.0025, an
+> effect of 0.93 standard deviations, and the two ranges overlap substantially
+> ([0.9556, 0.9587] against [0.9510, 0.9576]). With three runs per arm this is
+> nowhere near separation. For scale, the lung-masking ablation of §4.5 moves
+> macro F1 by 0.0246 — an order of magnitude larger than either the backbone
+> difference or the noise it sits in.
+>
+> **This is why the study was necessary rather than tidy.** Comparing the two
+> seed-42 runs alone gives −0.0011, less than half the difference between the
+> means, because that particular ResNet18 run is the best of its three and that
+> particular ResNet50 run the best of its three. A single-run comparison here
+> would have reported a number that is out by a factor of two, and depending on
+> which pair of runs happened to be trained, could have reported either sign. We
+> note this because single-run backbone comparisons are common, and on this task
+> the run-to-run spread exceeds the effect being compared.
+>
+> **ResNet50 is markedly less stable.** Its standard deviation is 0.0034 against
+> ResNet18's 0.0016 and its range is twice as wide. The larger model is not
+> merely no better here; it is more dependent on initialisation, which is the
+> opposite of what additional capacity is usually expected to buy.
+>
+> **One difference does survive, and it is in AUC rather than F1.** Every
+> ResNet50 run scores a higher macro AUC than every ResNet18 run — the ranges do
+> not overlap at all, 0.9930–0.9937 against 0.9919–0.9928 — while macro F1 shows
+> no such separation. The larger model ranks the classes more reliably and
+> converts that ranking into decisions no better, and less consistently. This is
+> the same dissociation that appears in §4.5, where masking costs eight times
+> more macro F1 than macro AUC, and in §4.3, where the two fidelity metrics rank
+> the backbones oppositely: on this data, what separates the classes and what
+> places the decision boundary come apart repeatedly.
+>
+> The conventional reading of a flat capacity curve is that the task saturates.
+> A second reading is available given §4.5 and we consider it better supported:
+> **if a substantial part of the achievable score is obtainable from acquisition
+> signature, the smaller network has already extracted it and additional
+> capacity has nothing left to buy.** Under this interpretation the flatness is
+> a property of the dataset rather than the task, and would not be expected to
+> hold where provenance and label are decorrelated.
+>
+> We report the comparison chiefly as a caution. A negative capacity ablation is
+> frequently presented as evidence that a small model suffices; here it is at
+> least equally consistent with the conclusion that neither model is doing what
+> the class names suggest.
 >
 > The conventional reading is that the task saturates at this scale. A second
 > reading is available given §4.5, and we consider it better supported: **if a
@@ -744,10 +815,14 @@ the Radiography Database segment *lungs*, not findings.
 > diagnosis. Class balance does not reflect prevalence, so no output estimates
 > the probability that a patient has anything. The localisation metric uses lung
 > masks rather than pathology annotations. Explanation fidelity was measured on
-> 200 images per backbone at 50 perturbation steps. Each configuration was
-> trained once, so the capacity comparison in §4.2 carries no significance
-> claim, and the two-backbone agreement on the deletion/OOD relationship is two
-> points rather than a trend. And no clinician evaluation was conducted: the
+> 200 images per backbone at 50 perturbation steps, on the seed-42 checkpoints
+> only — the seed study of §4.2 covers classification metrics, not explanation
+> metrics, so we cannot say how much of the fidelity difference between the two
+> backbones is itself run-to-run variance. The two-backbone agreement on the
+> deletion/OOD relationship is likewise two points rather than a trend. Three
+> seeds per arm supports the claim that the capacity difference is not
+> distinguishable from noise, but is too few to estimate that noise precisely.
+> And no clinician evaluation was conducted: the
 > usability study proposed in the original design remains outstanding, and we
 > note that our findings raise a specific question for it — whether clinicians
 > shown a plausible heatmap from a shortcut-driven model correctly withhold
@@ -763,8 +838,9 @@ the Radiography Database segment *lungs*, not findings.
 > the explanations establish. Both backbones reach a macro F1 near 0.958 and a
 > macro AUC near 0.993. Both explanations pass the fidelity tests we could
 > construct. Neither detects the shortcut we can independently prove the model
-> uses, and a 2.3x increase in capacity buys nothing, which is what one expects
-> when the shortcut is already exhausted.
+> uses, and a 2.1x increase in capacity buys nothing distinguishable from seed
+> noise across three runs per backbone — while doubling the variance between
+> runs — which is what one expects when the shortcut is already exhausted.
 >
 > We also report two methodological findings of wider applicability: that the
 > deletion metric is confounded by distribution shift in a way that is
