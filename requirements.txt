@@ -29,6 +29,15 @@ scikit-learn>=1.4
 matplotlib>=3.8
 tqdm>=4.66
 
+# Explainability. Grad-CAM and the SHAP values in src/shap_utils.py are both
+# implemented here against torch directly -- the head is one linear layer, so
+# its Shapley values have a closed form and need no solver. shap is listed
+# because tests/test_shap.py checks that closed form against
+# shap.LinearExplainer, which is what entitles the paper to cite Lundberg &
+# Lee for these numbers. Nothing at serving time imports it, so a deployment
+# that skips it loses the cross-check and no functionality.
+shap>=0.44
+
 # Fetching the real datasets. Needs a Kaggle account and an API token at
 # ~/.kaggle/kaggle.json -- neither dataset is redistributed here, and nothing
 # else in this file requires it. Skip it if you are only running the synthetic

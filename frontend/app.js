@@ -1,6 +1,9 @@
 /* Chest X-ray Classifier — frontend logic.
  *
- * Talks to the FastAPI service: GET /health, POST /predict, POST /explain.
+ * Talks to the FastAPI service: GET /health and POST /analyze, which returns
+ * the prediction, the Grad-CAM overlay and the SHAP attributions in one
+ * response. /predict and /explain remain on the service for callers that want
+ * only one of the three; this page always wants all of them.
  * No framework and no build step, matching the triage app.
  *
  * The API address is configurable and stored locally, because the interesting
@@ -28,13 +31,14 @@ const els = {
   warnOod: $('warn-ood'), warnLowConf: $('warn-lowconf'), warnNoCheck: $('warn-nocheck'),
   camCard: $('cam-card'), cam: $('cam'), camClass: $('cam-class'),
   camRun: $('cam-run'), camCaption: $('cam-caption'),
+  shapCard: $('shap-card'), shapSubject: $('shap-subject'),
+  shapBars: $('shap-bars'), shapCoverage: $('shap-coverage'),
   health: $('health'), healthDetail: $('health-detail'),
   settings: $('settings'), settingsOpen: $('settings-open'), api: $('api'),
 };
 
 let selected = null;      // the File the user chose
 let previewUrl = null;    // object URL for the preview, revoked on replace
-let camUrl = null;        // object URL for the returned overlay PNG
 
 /* ------------------------------------------------------------------ config */
 
@@ -101,6 +105,7 @@ function clearFile() {
 function hideResults() {
   els.results.hidden = true;
   els.camCard.hidden = true;
+  els.shapCard.hidden = true;
 }
 
 function setStatus(text, isError) {
@@ -120,27 +125,38 @@ async function errorText(response) {
   return `Request failed (HTTP ${response.status}).`;
 }
 
+/* One call, not three. /analyze returns the prediction, the heatmap and the
+ * attributions together because they are meant to be read together -- fetching
+ * them separately is what lets an interface show the picture and quietly drop
+ * the numbers. /predict and /explain still exist for callers that want one. */
 async function analyse() {
   if (!selected) return;
 
   els.run.disabled = true;
   setStatus('Analysing…');
 
-  const form = new FormData();
-  form.append('file', selected, selected.name);
-
   try {
-    const response = await fetch(`${apiBase()}/predict`, { method: 'POST', body: form });
-    if (!response.ok) throw new Error(await errorText(response));
-
-    renderPrediction(await response.json());
+    const data = await requestAnalysis(els.camClass.value);
+    renderPrediction(data);
+    renderExplanation(data);
     setStatus('');
-    await loadCam();
   } catch (error) {
     setStatus(describeNetworkError(error), true);
   } finally {
     els.run.disabled = false;
   }
+}
+
+async function requestAnalysis(className) {
+  const form = new FormData();
+  form.append('file', selected, selected.name);
+
+  const url = `${apiBase()}/analyze`
+    + (className ? `?class_name=${encodeURIComponent(className)}` : '');
+
+  const response = await fetch(url, { method: 'POST', body: form });
+  if (!response.ok) throw new Error(await errorText(response));
+  return response.json();
 }
 
 /* A cross-origin fetch to a host that is not listening fails as an opaque
@@ -193,39 +209,89 @@ function renderPrediction(data) {
   }));
 }
 
-async function loadCam() {
+/* Re-run for a different class. Both explanations are class-specific, so the
+ * map and the bars have to move together -- leaving the old attributions
+ * beside a new heatmap would caption one class's reasoning with another's. */
+async function reExplain() {
   if (!selected) return;
 
-  els.camCard.hidden = false;
   els.camCaption.textContent = 'Generating heatmap…';
 
-  const form = new FormData();
-  form.append('file', selected, selected.name);
-
-  const chosen = els.camClass.value;
-  const url = `${apiBase()}/explain` + (chosen ? `?class_name=${encodeURIComponent(chosen)}` : '');
-
   try {
-    const response = await fetch(url, { method: 'POST', body: form });
-    if (!response.ok) throw new Error(await errorText(response));
-
-    /* The service reports these separately because they come apart whenever a
-     * class is requested: the map then answers "why not pneumonia?" while the
-     * model's actual call is still something else. Collapsing them into one
-     * line would put two different classes' numbers under one label. */
-    const predicted = response.headers.get('X-Prediction');
-    const explained = response.headers.get('X-Explained-Class');
-
-    if (camUrl) URL.revokeObjectURL(camUrl);
-    camUrl = URL.createObjectURL(await response.blob());
-    els.cam.src = camUrl;
-
-    els.camCaption.textContent = (predicted && explained && predicted !== explained)
-      ? `Model predicted ${predicted}. This map answers for ${explained}.`
-      : `Heatmap for ${explained || predicted || 'the predicted class'}.`;
+    renderExplanation(await requestAnalysis(els.camClass.value));
   } catch (error) {
     els.camCaption.textContent = describeNetworkError(error);
   }
+}
+
+function renderExplanation(data) {
+  els.camCard.hidden = false;
+
+  /* A data URL rather than an object URL: the PNG arrives inside the JSON, so
+   * there is no Blob to revoke and nothing to leak. */
+  els.cam.src = `data:image/png;base64,${data.gradcam_png_base64}`;
+
+  /* Reported separately because they come apart whenever a class is requested:
+   * the map then answers "why not pneumonia?" while the model's actual call is
+   * still something else. Collapsing them would put two different classes'
+   * numbers under one label. */
+  const predicted = data.prediction;
+  const explained = data.explained_class;
+
+  els.camCaption.textContent = (predicted && explained && predicted !== explained)
+    ? `Model predicted ${predicted}. This map answers for ${explained}.`
+    : `Heatmap for ${explained || predicted || 'the predicted class'}.`;
+
+  renderShap(data);
+}
+
+function renderShap(data) {
+  const shap = data.shap;
+
+  /* Null means the service had no background loaded and never computed the
+   * attribution. Rendering an empty chart would say "nothing contributed",
+   * which is a far stronger claim than "this was not measured" -- the same
+   * distinction the out-of-distribution notice exists to preserve. */
+  if (!shap || !Array.isArray(shap.features) || !shap.features.length) {
+    els.shapCard.hidden = true;
+    return;
+  }
+
+  els.shapCard.hidden = false;
+  els.shapSubject.textContent =
+    `Toward or against ${data.explained_class}, per learned feature. `
+    + `The bars below sum with a base of ${shap.base_value.toFixed(2)} to the `
+    + `model's score of ${shap.logit.toFixed(2)}.`;
+
+  /* Scaled to the largest bar shown, so the longest one fills half the track.
+   * The absolute logit scale means nothing to a reader; the relative sizes do. */
+  const peak = Math.max(...shap.features.map((row) => Math.abs(row.value))) || 1;
+
+  els.shapBars.replaceChildren(...shap.features.map((row) => {
+    const element = document.createElement('div');
+    element.className = 'shap-row';
+    element.innerHTML = `
+      <span class="shap-name"></span>
+      <span class="shap-track">
+        <span class="shap-fill ${row.value >= 0 ? 'pos' : 'neg'}"
+              style="width:${(Math.abs(row.value) / peak * 50).toFixed(1)}%"></span>
+      </span>
+      <span class="shap-value"></span>`;
+    element.querySelector('.shap-name').textContent = `feature ${row.feature}`;
+    element.querySelector('.shap-value').textContent = row.value >= 0
+      ? `+${row.value.toFixed(3)}`
+      : row.value.toFixed(3);
+    return element;
+  }));
+
+  /* The number that decides how the chart should be read. Fifteen bars out of
+   * 512 carrying 15% of the movement is a sample of the reasoning, not a
+   * summary of it, and the chart cannot show that about itself. */
+  const percent = Math.round((shap.coverage ?? 0) * 100);
+  els.shapCoverage.textContent =
+    `These ${shap.features.length} of ${shap.feature_count} features account for `
+    + `${percent}% of what moved the score. The rest is spread across the others — `
+    + `this is a sample of the model's reasoning, not the whole of it.`;
 }
 
 /* Rebuild the "explain class" dropdown from whatever the server said its
@@ -277,6 +343,13 @@ async function checkHealth() {
         notes.push('no out-of-distribution statistics loaded — nothing is ' +
                    'checked for being a chest X-ray');
       }
+      /* Same reasoning: without a background the attribution panel simply does
+       * not appear, and its absence is otherwise indistinguishable from a
+       * model whose features happened to contribute nothing. */
+      if (!data.shap_background_loaded) {
+        notes.push('no SHAP background loaded — per-feature attributions are ' +
+                   'not computed');
+      }
       els.healthDetail.textContent = notes.join(' · ');
     } else {
       els.health.textContent = 'API up, no model loaded';
@@ -318,7 +391,7 @@ for (const type of ['dragleave', 'drop']) {
 els.drop.addEventListener('drop', (event) => selectFile(event.dataTransfer.files[0]));
 
 els.run.addEventListener('click', analyse);
-els.camRun.addEventListener('click', loadCam);
+els.camRun.addEventListener('click', reExplain);
 
 els.settingsOpen.addEventListener('click', () => {
   els.api.value = apiBase();

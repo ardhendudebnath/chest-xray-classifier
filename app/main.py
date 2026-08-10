@@ -17,6 +17,7 @@ question was not asked rather than answered in the negative.
     uvicorn app.main:app --port 8100 --reload
 """
 
+import base64
 import io
 import os
 from contextlib import asynccontextmanager
@@ -32,9 +33,19 @@ from src.dataset import CLASSES, build_transforms
 from src.gradcam_utils import explain_image
 from src.model import forward_with_features, load_checkpoint, pick_device
 from src.ood import DEFAULT_STATS_PATH, is_out_of_distribution, load_stats, score
+from src.shap_utils import (
+    DEFAULT_BACKGROUND_PATH,
+    DEFAULT_TOP_K,
+    coverage,
+    head_parameters,
+    load_background,
+    shap_values,
+    top_contributions,
+)
 
 CHECKPOINT_PATH = os.getenv("CXR_CHECKPOINT", "checkpoints/best.pt")
 OOD_STATS_PATH = os.getenv("CXR_OOD_STATS", DEFAULT_STATS_PATH)
+SHAP_BACKGROUND_PATH = os.getenv("CXR_SHAP_BACKGROUND", DEFAULT_BACKGROUND_PATH)
 
 # 15 MB. Chest X-ray PNGs run a few hundred KB after downscaling; anything past
 # this is either a mistake or someone probing the endpoint.
@@ -54,6 +65,7 @@ state = {
     "device": None,
     "checkpoint": None,
     "ood": None,
+    "shap": None,
 }
 
 
@@ -79,6 +91,28 @@ def _load_ood_stats(model):
     return None
 
 
+def _load_shap_background(model):
+    """The SHAP reference vector, or None with a reason printed.
+
+    Same contract as _load_ood_stats, and the same reason for it: a background
+    fitted against different weights describes a different feature space, so
+    every contribution computed from it would be wrong with no symptom beyond a
+    chart that looks a little odd. Missing or mismatched leaves this None, and
+    /analyze then reports the SHAP block as null rather than as empty.
+    """
+    try:
+        return load_background(SHAP_BACKGROUND_PATH, model)
+    except FileNotFoundError:
+        print(
+            f"no SHAP background at {SHAP_BACKGROUND_PATH} -- /analyze will "
+            f"return no attributions. Fit one with "
+            f"python -m src.shap_utils --fit"
+        )
+    except ValueError as error:
+        print(f"ignoring SHAP background at {SHAP_BACKGROUND_PATH}: {error}")
+    return None
+
+
 @asynccontextmanager
 async def lifespan(app):
     device = pick_device()
@@ -97,10 +131,13 @@ async def lifespan(app):
         device=device,
         checkpoint=checkpoint,
         ood=_load_ood_stats(model),
+        shap=_load_shap_background(model),
     )
     print(f"loaded {CHECKPOINT_PATH} ({checkpoint['backbone']}) on {device}")
     if state["ood"] is not None:
         print(f"loaded OOD stats from {OOD_STATS_PATH}")
+    if state["shap"] is not None:
+        print(f"loaded SHAP background from {SHAP_BACKGROUND_PATH}")
     yield
 
 
@@ -199,6 +236,11 @@ def health():
         "ood_stats": OOD_STATS_PATH,
         "ood_stats_loaded": stats is not None,
         "ood_percentile": stats["percentile"] if stats else None,
+        # Reported for the same reason as the OOD statistics: /analyze serves
+        # happily without a background and a caller has no other way to find
+        # out that every shap block it is reading back is null.
+        "shap_background": SHAP_BACKGROUND_PATH,
+        "shap_background_loaded": state["shap"] is not None,
     }
 
 
@@ -279,6 +321,114 @@ async def explain(file: UploadFile = File(...), class_name: str = None):
             "X-Disclaimer": DISCLAIMER,
         },
     )
+
+
+def _shap_fields(features, class_idx, top_k):
+    """The SHAP block for one image, or None when no background is loaded.
+
+    None means the attribution was not computed. It is not an empty
+    explanation, and a caller that renders it as "no features contributed" has
+    the same bug the out_of_distribution field is written to avoid.
+    """
+    background = state["shap"]
+    if background is None:
+        return None
+
+    weight, bias = head_parameters(state["model"], state["backbone"])
+    values, base = shap_values(
+        features.cpu().numpy(), background["mean"], weight, bias
+    )
+    selected = values[0, class_idx]
+    total = float(selected.sum())
+
+    return {
+        "base_value": round(float(base[class_idx]), 4),
+        "sum_of_contributions": round(total, 4),
+        # base + sum is the logit, exactly -- the Shapley efficiency axiom. Sent
+        # so a client can check the decomposition it is being shown rather than
+        # taking the bars on trust.
+        "logit": round(float(base[class_idx]) + total, 4),
+        "features": [
+            {"feature": index, "value": round(value, 4)}
+            for index, value in top_contributions(selected, top_k)
+        ],
+        "feature_count": int(selected.size),
+        # What fraction of the movement the listed features account for. On this
+        # model the top 15 of 512 come to about 15%, so a client that presents
+        # the bars as "the reason" is overstating them by a wide margin.
+        "coverage": round(coverage(selected, top_k), 4),
+    }
+
+
+@app.post("/analyze")
+async def analyze(
+    file: UploadFile = File(...),
+    class_name: str = None,
+    top_k: int = DEFAULT_TOP_K,
+):
+    """Prediction, Grad-CAM and SHAP in one JSON response.
+
+    /predict and /explain remain what they were -- one returns numbers, the
+    other returns a PNG, and a client that only wants the picture should not be
+    made to base64-decode it. This endpoint exists because the two explanations
+    are meant to be read together: the heatmap says where, the attributions say
+    how much, and delivering them in separate round trips invites a caller to
+    show one and drop the other.
+
+    The overlay is base64 rather than a URL because nothing here stores images.
+    An endpoint handing back a link would need somewhere to put the upload, and
+    a research prototype that starts retaining chest X-rays has acquired a
+    problem it does not want.
+    """
+    _require_model()
+
+    if class_name is not None and class_name not in CLASSES:
+        raise HTTPException(
+            status_code=400, detail=f"class_name must be one of {CLASSES}"
+        )
+    if top_k < 1:
+        raise HTTPException(status_code=400, detail="top_k must be at least 1.")
+
+    image = await _read_image(file)
+    requested_idx = CLASSES.index(class_name) if class_name else None
+
+    tensor = build_transforms(train=False)(image.convert("L"))
+    tensor = tensor.unsqueeze(0).to(state["device"])
+
+    with torch.no_grad():
+        logits, features = forward_with_features(
+            state["model"], state["backbone"], tensor
+        )
+    probabilities = torch.softmax(logits, dim=1)[0].cpu()
+
+    predicted_idx = int(probabilities.argmax())
+    explained_idx = requested_idx if requested_idx is not None else predicted_idx
+
+    overlay, _, _ = explain_image(
+        state["model"], state["backbone"], image, state["device"], explained_idx
+    )
+    buffer = io.BytesIO()
+    overlay.save(buffer, format="PNG")
+
+    ranked = sorted(
+        zip(CLASSES, probabilities.tolist()), key=lambda pair: pair[1], reverse=True
+    )
+
+    return {
+        "prediction": CLASSES[predicted_idx],
+        "confidence": round(float(probabilities[predicted_idx]), 4),
+        "probabilities": {name: round(value, 4) for name, value in ranked},
+        "low_confidence": float(probabilities[predicted_idx]) < 0.6,
+        # Reported separately from the prediction for the reason /explain does
+        # it: when class_name is passed the heatmap and the attributions answer
+        # "why not X" while the model's own call is still something else.
+        "explained_class": CLASSES[explained_idx],
+        "explained_confidence": round(float(probabilities[explained_idx]), 4),
+        "gradcam_png_base64": base64.b64encode(buffer.getvalue()).decode("ascii"),
+        "shap": _shap_fields(features, explained_idx, top_k),
+        **_ood_fields(features),
+        "disclaimer": DISCLAIMER,
+    }
 
 
 # Serving the page from this process is off by default and opt-in through the

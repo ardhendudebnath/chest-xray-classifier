@@ -11,20 +11,25 @@ from PIL import Image
 from src.dataset import CLASSES
 
 
-def load_app(monkeypatch, checkpoint_path, ood_path=None):
+def load_app(monkeypatch, checkpoint_path, ood_path=None, shap_path=None):
     """Re-import app.main so it picks up its paths from the environment.
 
-    Both are read at import time into module constants, so setting the
+    All three are read at import time into module constants, so setting the
     variables after the first import would have no effect.
 
-    ood_path defaults to somewhere that does not exist, rather than to the
-    module default: that default is `checkpoints/ood.pt`, which is a real file
-    in a working checkout, and letting it load would make these tests depend on
-    whether someone had run src.ood.
+    ood_path and shap_path default to somewhere that does not exist, rather
+    than to the module defaults: those are `checkpoints/ood.pt` and
+    `checkpoints/shap_background.pt`, both real files in a working checkout,
+    and letting them load would make these tests depend on whether someone had
+    run src.ood or src.shap_utils --fit.
     """
     monkeypatch.setenv("CXR_CHECKPOINT", str(checkpoint_path))
     monkeypatch.setenv(
         "CXR_OOD_STATS", str(ood_path or checkpoint_path.parent / "no-such-ood.pt")
+    )
+    monkeypatch.setenv(
+        "CXR_SHAP_BACKGROUND",
+        str(shap_path or checkpoint_path.parent / "no-such-background.pt"),
     )
     import app.main
 
@@ -330,6 +335,186 @@ def test_the_api_still_answers_with_the_page_mounted(monkeypatch, checkpoint):
         # The page reads its class list from /health, so shipping them from one
         # process is only safe while that request still reaches the API.
         assert test_client.get("/app.js").status_code == 200
+
+
+# --------------------------------------------------------------- /analyze
+
+
+def write_background(path, checkpoint_path):
+    """A SHAP background for this checkpoint, centred at zero.
+
+    A zero mean keeps the arithmetic checkable by hand: every contribution is
+    then w_i * x_i and the base value is the bias alone, so a test can assert
+    the decomposition without recomputing the model. What is under test is that
+    the numbers reach the caller intact, not what a real background contains.
+    """
+    from src.model import fingerprint_state_dict, load_checkpoint
+    from src.shap_utils import save_background
+
+    model, _ = load_checkpoint(checkpoint_path, "cpu")
+    dimension = model.fc.in_features
+
+    return save_background(
+        path,
+        {
+            "mean": torch.zeros(dimension, dtype=torch.float64),
+            "classes": list(CLASSES),
+            "backbone": "resnet18",
+            "feature_dim": dimension,
+            "images": 10,
+            "fingerprint": fingerprint_state_dict(model.state_dict()),
+        },
+    )
+
+
+@pytest.fixture
+def client_with_shap(monkeypatch, checkpoint, tmp_path):
+    path = write_background(tmp_path / "background.pt", checkpoint)
+    module = load_app(monkeypatch, checkpoint, shap_path=path)
+    with TestClient(module.app) as test_client:
+        yield test_client
+
+
+def test_analyze_returns_prediction_heatmap_and_attributions_together(
+    client_with_shap, png_bytes
+):
+    """The paper's integration endpoint: one call, all three outputs. Split
+    across round trips a caller can render the picture and quietly drop the
+    numbers, which is the failure this exists to prevent."""
+    body = client_with_shap.post(
+        "/analyze", files={"file": ("xray.png", png_bytes, "image/png")}
+    ).json()
+
+    assert body["prediction"] in CLASSES
+    assert set(body["probabilities"]) == set(CLASSES)
+    assert body["gradcam_png_base64"]
+    assert body["shap"]["features"]
+    assert body["disclaimer"]
+
+
+def test_the_returned_overlay_is_a_real_png(client_with_shap, png_bytes):
+    """base64 of something that is not an image would still be a valid string
+    in the JSON and would fail only in the browser."""
+    import base64
+
+    body = client_with_shap.post(
+        "/analyze", files={"file": ("xray.png", png_bytes, "image/png")}
+    ).json()
+
+    decoded = base64.b64decode(body["gradcam_png_base64"])
+    image = Image.open(io.BytesIO(decoded))
+
+    assert image.format == "PNG"
+    assert image.size == (224, 224)
+
+
+def test_the_attribution_the_caller_receives_still_balances(
+    client_with_shap, png_bytes
+):
+    """The Shapley efficiency axiom, checked at the far end of the wire.
+
+    Everything upstream is asserted in test_shap.py against numpy arrays. This
+    is the same identity after rounding to four places and a JSON round trip,
+    which is what a client actually receives and is entitled to verify.
+    """
+    body = client_with_shap.post(
+        "/analyze", files={"file": ("xray.png", png_bytes, "image/png")}
+    ).json()
+    shap = body["shap"]
+
+    assert shap["base_value"] + shap["sum_of_contributions"] == pytest.approx(
+        shap["logit"], abs=1e-3
+    )
+
+
+def test_the_listed_features_are_ranked_by_magnitude(client_with_shap, png_bytes):
+    body = client_with_shap.post(
+        "/analyze?top_k=8", files={"file": ("xray.png", png_bytes, "image/png")}
+    ).json()
+    values = [abs(row["value"]) for row in body["shap"]["features"]]
+
+    assert len(values) == 8
+    assert values == sorted(values, reverse=True)
+    assert body["shap"]["feature_count"] == 512
+    assert 0.0 <= body["shap"]["coverage"] <= 1.0
+
+
+def test_no_background_reports_null_rather_than_no_contributions(client, png_bytes):
+    """Same distinction /predict draws for the OOD check. Null means the
+    attribution was not computed; an empty list would mean it was computed and
+    found nothing, which is a different and much stronger claim."""
+    body = client.post(
+        "/analyze", files={"file": ("xray.png", png_bytes, "image/png")}
+    ).json()
+
+    assert body["shap"] is None
+    assert client.get("/health").json()["shap_background_loaded"] is False
+
+
+def test_health_reports_a_loaded_background(client_with_shap):
+    assert client_with_shap.get("/health").json()["shap_background_loaded"] is True
+
+
+def test_a_background_from_another_checkpoint_is_refused_at_startup(
+    monkeypatch, checkpoint, tmp_path, capsys
+):
+    """A mismatched background measures deviations from the wrong means. The
+    service still starts -- the classifier is unaffected -- but it must report
+    the attributions as unavailable rather than serve meaningless ones."""
+    from src.model import build_model, save_checkpoint
+
+    other = tmp_path / "other.pt"
+    save_checkpoint(other, build_model("resnet18", pretrained=False), "resnet18", 1, {})
+    path = write_background(tmp_path / "background.pt", other)
+
+    module = load_app(monkeypatch, checkpoint, shap_path=path)
+    with TestClient(module.app) as test_client:
+        assert test_client.get("/health").json()["shap_background_loaded"] is False
+
+    assert "ignoring SHAP background" in capsys.readouterr().out
+
+
+def test_analyze_separates_the_prediction_from_the_explained_class(
+    client_with_shap, png_bytes
+):
+    """Asking why not pneumonia does not make pneumonia the prediction. The
+    two are reported under different keys for the reason /explain puts them in
+    different headers."""
+    body = client_with_shap.post(
+        "/analyze?class_name=PNEUMONIA",
+        files={"file": ("xray.png", png_bytes, "image/png")},
+    ).json()
+
+    assert body["explained_class"] == "PNEUMONIA"
+    assert body["explained_confidence"] == body["probabilities"]["PNEUMONIA"]
+    assert body["prediction"] == max(
+        body["probabilities"], key=body["probabilities"].get
+    )
+
+
+def test_analyze_rejects_an_unknown_class(client_with_shap, png_bytes):
+    response = client_with_shap.post(
+        "/analyze?class_name=TUBERCULOSIS",
+        files={"file": ("xray.png", png_bytes, "image/png")},
+    )
+    assert response.status_code == 400
+
+
+def test_analyze_rejects_a_nonsense_top_k(client_with_shap, png_bytes):
+    response = client_with_shap.post(
+        "/analyze?top_k=0", files={"file": ("xray.png", png_bytes, "image/png")}
+    )
+    assert response.status_code == 400
+
+
+def test_analyze_needs_a_model(monkeypatch, tmp_path):
+    module = load_app(monkeypatch, tmp_path / "missing.pt")
+
+    with TestClient(module.app) as test_client:
+        response = test_client.post(
+            "/analyze", files={"file": ("x.png", synthetic_png(), "image/png")}
+        )
+        assert response.status_code == 503
 
 
 def test_a_missing_frontend_directory_does_not_stop_the_api(

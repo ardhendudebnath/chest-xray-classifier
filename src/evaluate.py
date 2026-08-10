@@ -20,6 +20,8 @@ from sklearn.metrics import (
     classification_report,
     confusion_matrix,
     f1_score,
+    precision_recall_fscore_support,
+    roc_auc_score,
 )
 
 from src.dataset import CLASSES, build_loader, class_counts
@@ -47,6 +49,80 @@ def collect_predictions(model, loader, device):
         np.array(all_predictions),
         np.array(all_probabilities),
     )
+
+
+def per_class_auc(targets, probabilities):
+    """One-vs-rest ROC AUC per class, with None wherever it is undefined.
+
+    Computed per class from binarised labels rather than through
+    roc_auc_score(multi_class="ovr"), which requires every class to be present
+    and raises for the whole split when one is not. A split missing a class is
+    a real case here -- src.cross_dataset scores a dataset that has no lung
+    opacity directory -- and losing the other three columns to it is not a
+    trade worth making. The missing class gets None and the rest are reported.
+
+    AUC is threshold-free: it asks whether the model *ranks* the positives
+    above the negatives, not whether argmax lands on the right one. That makes
+    it the metric least affected by the class imbalance, and also the one least
+    connected to what the served model actually does, since serving takes an
+    argmax. Read it beside the per-class recall, never instead of it.
+    """
+    targets = np.asarray(targets)
+    probabilities = np.asarray(probabilities)
+    scores = []
+
+    for index in range(len(CLASSES)):
+        positive = targets == index
+        # A column that is all positives or all negatives has no ROC curve --
+        # one of the two rates is 0/0 at every threshold.
+        if positive.all() or not positive.any():
+            scores.append(None)
+            continue
+        scores.append(float(roc_auc_score(positive, probabilities[:, index])))
+
+    return scores
+
+
+def macro_average(values):
+    """Mean over the classes that have a value, or None if none of them do.
+
+    Macro rather than weighted, for the same reason selection is on macro F1:
+    a weighted average is set by whichever class is largest, which here is
+    NORMAL at roughly half the split.
+    """
+    present = [value for value in values if value is not None]
+    return float(np.mean(present)) if present else None
+
+
+def per_class_table(targets, predictions, probabilities):
+    """The paper's Table 1 row 1, per class: precision, recall, F1, AUC, support."""
+    precision, recall, f1, support = precision_recall_fscore_support(
+        targets,
+        predictions,
+        labels=range(len(CLASSES)),
+        zero_division=0,
+    )
+    auc = per_class_auc(targets, probabilities)
+
+    return {
+        name: {
+            "precision": float(precision[index]),
+            "recall": float(recall[index]),
+            "f1": float(f1[index]),
+            "auc": auc[index],
+            "support": int(support[index]),
+        }
+        for index, name in enumerate(CLASSES)
+    }
+
+
+def print_auc(per_class):
+    """AUC does not appear in classification_report, so it gets its own block."""
+    print("\none-vs-rest ROC AUC")
+    for name, row in per_class.items():
+        value = "     n/a" if row["auc"] is None else f"{row['auc']:8.4f}"
+        absent = "  (class absent from this split)" if row["auc"] is None else ""
+        print(f"  {name:<14}{value}{absent}")
 
 
 def print_confusion(matrix):
@@ -127,7 +203,7 @@ def main():
     print(f"checkpoint: {args.checkpoint} (epoch {checkpoint['epoch']}, {checkpoint['backbone']})")
     print(f"{args.split}: {len(dataset)} images {class_counts(dataset)}")
 
-    targets, predictions, _ = collect_predictions(model, loader, device)
+    targets, predictions, probabilities = collect_predictions(model, loader, device)
 
     print("\nper-class scores")
     print(
@@ -141,23 +217,38 @@ def main():
         )
     )
 
+    per_class = per_class_table(targets, predictions, probabilities)
+    print_auc(per_class)
+
     matrix = confusion_matrix(targets, predictions, labels=range(len(CLASSES)))
     print_confusion(matrix)
 
     accuracy = accuracy_score(targets, predictions)
     macro_f1 = f1_score(targets, predictions, average="macro", zero_division=0)
-    print(f"\nmacro F1: {macro_f1:.4f}")
-    print(f"accuracy: {accuracy:.4f}")
+    macro_auc = macro_average([row["auc"] for row in per_class.values()])
+    print(f"\nmacro F1:  {macro_f1:.4f}")
+    if macro_auc is not None:
+        print(f"macro AUC: {macro_auc:.4f}")
+    print(f"accuracy:  {accuracy:.4f}")
 
     report_dir = Path(args.report_dir)
     report_dir.mkdir(parents=True, exist_ok=True)
 
+    # Keys are only ever added here, never renamed. Every number in the README
+    # was read out of one of these files, and the older runs under reports/ are
+    # not going to be regenerated.
     summary = {
         "split": args.split,
         "checkpoint": str(args.checkpoint),
         "images": len(dataset),
         "accuracy": float(accuracy),
         "macro_f1": float(macro_f1),
+        "macro_auc": macro_auc,
+        "macro_precision": macro_average(
+            [row["precision"] for row in per_class.values()]
+        ),
+        "macro_recall": macro_average([row["recall"] for row in per_class.values()]),
+        "per_class": per_class,
         "confusion_matrix": matrix.tolist(),
         "classes": CLASSES,
     }

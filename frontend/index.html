@@ -146,6 +146,33 @@
     </p>
   </section>
 
+  <!-- The other half of the explanation. The heatmap says where; this says how
+       much, per learned feature. Hidden entirely when the service has no SHAP
+       background loaded, rather than shown empty -- an empty chart would read
+       as "nothing contributed", which is a much stronger claim than "this was
+       not computed". -->
+  <section class="card" id="shap-card" hidden>
+    <h2>How much each feature moved it</h2>
+
+    <p id="shap-subject" class="muted small"></p>
+
+    <div id="shap-bars" class="shap-bars"></div>
+
+    <!-- Load-bearing, not a caption. On this model the listed features carry
+         about 15% of the total movement, so presenting the bars as "the
+         reason" overstates them several times over. -->
+    <p id="shap-coverage" class="shap-note small"></p>
+
+    <p class="muted small">
+      These are SHAP values over the network's own learned features, measured
+      against the average training image. They are exact — the bars plus the
+      base value reconstruct the score the model produced.
+      <strong>A feature number is not a medical finding.</strong> Feature 453 is
+      whatever the network learned to detect; nothing here is labelled
+      "consolidation", and no reading of these bars produces a diagnosis.
+    </p>
+  </section>
+
   <section class="card" id="about">
     <h2>Why to distrust it</h2>
     <ul class="reasons">

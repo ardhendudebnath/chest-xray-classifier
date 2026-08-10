@@ -38,7 +38,13 @@ usual:
   everything else still have no output and still land on whichever class is
   nearest. **NORMAL means "not the other three", never "clear".**
 
-Grad-CAM is included for exactly this reason. It is not decoration.
+Grad-CAM is included for exactly this reason. It is not decoration, and it was
+measured rather than assumed to work: see [Are the explanations any good?
+](#are-the-explanations-any-good). SHAP sits beside it and answers a different
+question — how much each learned feature moved the logit — but note that its
+baseline is the average training image, so it **inherits the provenance
+confound rather than detecting it**. Neither explanation can settle the
+question in the first bullet above.
 
 ## At a glance
 
@@ -60,9 +66,16 @@ flowchart TD
     SPLIT --> OOD["src.ood<br/>fit one Gaussian per class, cutoffs at p95"]
     CKPT --> OOD
     OOD --> STATS["checkpoints/ood.pt"]
-    CKPT --> EV["src.evaluate<br/>per-class F1 and confusion matrix"]
-    CKPT --> API["app.main<br/>/predict · /explain · /health"]
+    SPLIT --> SH["src.shap_utils --fit<br/>mean feature vector, the SHAP baseline"]
+    CKPT --> SH
+    SH --> BG["checkpoints/shap_background.pt"]
+    CKPT --> EV["src.evaluate<br/>per-class F1, AUC, confusion matrix"]
+    CKPT --> XE["src.xai_eval<br/>deletion · insertion · lung mass · stability"]
+    STATS --> XE
+    BG --> XE
+    CKPT --> API["app.main<br/>/predict · /explain · /analyze · /health"]
     STATS --> API
+    BG --> API
     API --> FE["frontend<br/>PWA, class list read from /health"]
 ```
 
@@ -93,6 +106,7 @@ against a cutoff of 939.8.
 | four-class, 3,175 test images | macro F1 | accuracy |
 |---|---|---|
 | as downloaded | 0.9587 | 0.9524 |
+| the same with resnet50, 2.1x the parameters | 0.9576 | 0.9512 |
 | lungs only, 77% of each image masked | 0.9341 | 0.9298 |
 | second dataset, clean, restricted | 0.9452 | 0.9675 |
 
@@ -109,6 +123,11 @@ repository an image came from. The rest of this file is largely about that.
 | Does it hold up off-dataset? | `src.cross_dataset` | 0.9452 macro F1 on the clean remainder, after the shared images are removed and reported separately. |
 | Does the refusal check still work? | `src.probe_ood` | All six non-radiographs refused; all six still called COVID19 above 98.7% by the softmax. |
 | What did NORMAL used to hide? | the class list itself | The three-class model called lung opacity films NORMAL 94.2% of the time at 0.972 confidence. Adding the class moved that error onto the confusion matrix. |
+| Do the heatmaps point at pixels the model uses? | `src.xai_eval` | Insertion, yes: +0.34 over a random ordering on resnet18 and +0.60 on resnet50. Deletion says no on both — and 59.7% / 72.6% of its steps are refused by the OOD check, which is why. |
+| Is the heat in the lungs? | `src.xai_eval` | Enrichment 1.359 (resnet18) and 1.274 (resnet50) over a uniform map. Modest, and it is lung-field mass rather than pathology IoU. |
+| Is there a short list of features behind a decision? | `src.shap_utils` | No. The top 15 carry 15.1% of the movement on resnet18, 14.2% on resnet50. |
+| Do these explanation scores compare across models? | `src.xai_eval` | Not raw. The random controls differ (0.44 vs 0.27) and cosine falls with dimension, so only gaps and ratios transfer. |
+| Does a bigger backbone help? | `--backbone resnet50` | No. 2.1x the parameters moves macro F1 by −0.0011, which is what you would expect if the shortcut were already exhausted. |
 
 ### Where to look
 
@@ -116,6 +135,8 @@ repository an image came from. The rest of this file is largely about that.
 - The provenance problem, measured: [The lung-masking check](#the-lung-masking-check)
 - Off-dataset scoring: [Scored against a second dataset](#scored-against-a-second-dataset)
 - Refusing non-radiographs: [Is it even a chest X-ray?](#is-it-even-a-chest-x-ray)
+- Per-feature attributions: [SHAP](#shap)
+- Whether either explanation is worth reading: [Are the explanations any good?](#are-the-explanations-any-good)
 
 ## Layout
 
@@ -127,13 +148,16 @@ src/evaluate.py        per-class report and confusion matrix
 src/ood.py             fits the "is this even a chest X-ray" check
 src/probe_ood.py       scores six non-radiographs, to check that it still works
 src/gradcam_utils.py   heatmaps, and a CLI for one image
+src/shap_utils.py      per-feature attributions, exact for a linear head
+src/xai_eval.py        scores the explanations themselves, not the predictions
 src/prepare_data.py    normalise a download into data/{train,val,test}/CLASS/
 src/dataset_overlap.py whether two datasets share images, before trusting one
 src/cross_dataset.py   score a second dataset with the shared images removed
 src/mask_lungs.py      mirror a split with everything outside the lungs blacked out
 src/synth_data.py      drawn stand-in images, for testing the pipeline
-app/main.py            FastAPI service: /health, /predict, /explain
+app/main.py            FastAPI service: /health, /predict, /explain, /analyze
 tests/                 pytest suite, no dataset and no network needed
+paper/                 write-up drafted against the numbers above
 ```
 
 ## Setup
@@ -283,6 +307,11 @@ recalls 60% of COVID-19 cases is useless for the thing you would want it for,
 and only the confusion matrix shows that. Writes
 `reports/confusion_test.png` and `reports/metrics_test.json`.
 
+The JSON carries per-class precision, recall, F1, one-vs-rest AUC and support
+under `per_class`, plus the macro averages. Keys are only ever added to that
+file and never renamed — every number quoted below was read out of one, and the
+older runs under `reports/` are not going to be regenerated.
+
 Then fit the out-of-distribution check, which the API needs before it can tell
 whether an upload is a chest X-ray at all — see
 [Is it even a chest X-ray?](#is-it-even-a-chest-x-ray):
@@ -308,14 +337,214 @@ signature is present *inside* the lung fields as well as around them, so a
 model reading provenance rather than pathology still produces heatmaps that
 look anatomically sensible. Heat on the lungs is necessary, not sufficient.
 
+## SHAP
+
+Grad-CAM says *where*. It cannot say *how much*, and two heatmaps that look
+alike can come from quite different reasons. `src/shap_utils.py` answers the
+other half: of the 512 numbers the classification head actually reads, which
+ones pushed the prediction up, which pushed it down, and by how many logits
+each.
+
+```bash
+~/venvs/smt/Scripts/python.exe -m src.shap_utils --fit --checkpoint checkpoints/best.pt --data-dir ~/cxr-data-4class
+~/venvs/smt/Scripts/python.exe -m src.shap_utils --checkpoint checkpoints/best.pt --image ~/cxr-data-4class/test/COVID19/00000_COVID-1447.png --out reports/shap_covid19.png
+```
+
+The attribution is over the **penultimate features, not the pixels**. That is
+what makes it complementary rather than a second opinion: pixel-level SHAP
+would produce another spatial map, and the project would then have two answers
+to "where" and none to "how much".
+
+It is also **exact**. The head is one `nn.Linear` over those features, so the
+logit is `w · x + b` and nothing else, and for a linear model the Shapley
+values have a closed form — `φᵢ = wᵢ(xᵢ − E[xᵢ])`, with no sampling and no
+convergence to check. Sum the contributions, add the base value, and the logit
+comes back exactly. That identity is the Shapley efficiency axiom and it is
+asserted in `tests/test_shap.py` rather than assumed, alongside a test that
+these are the same numbers `shap.LinearExplainer` produces. The closed form is
+what runs at serving time, so a deployment does not need the `shap` package;
+the cross-check is what entitles the work to cite Lundberg & Lee for these
+numbers.
+
+`--against CLASS` explains the *margin* over another class rather than the
+logit itself, which is what an argmax actually decides. It is the SHAP
+counterpart to `--class-name` on Grad-CAM.
+
+**Four things it does not tell you**, and they are why the module docstring is
+as long as it is:
+
+- **A feature index is not a clinical concept.** "Feature 453 contributed
+  +0.44 logits" is a true statement about the network and says nothing to a
+  radiologist. None of the 512 is "consolidation". `--channel-map` writes out
+  where the channel behind a contribution actually fires, which closes some of
+  that gap and does not close it.
+- **The features are correlated; this treats them as independent.** That is the
+  standard interventional assumption and it is what `shap.LinearExplainer` does
+  by default, but it is an assumption. `src.ood` already estimates the
+  covariance of exactly these features.
+- **It explains logits, not probabilities.** Softmax is not additive, so no
+  decomposition of a probability sums to that probability.
+- **The baseline carries the training set's provenance.** `E[x]` is the mean
+  feature vector over training images, so every contribution is measured
+  against the average image *in this dataset* — not against a healthy chest.
+  Given that the classes here are separable by source archive, a large
+  contribution is as consistent with "unlike the average scanner" as with
+  "unlike a healthy lung". **SHAP inherits the confound; it does not detect
+  it.**
+
+## Are the explanations any good?
+
+Everything above measures the classifier. `src/xai_eval.py` measures whether
+Grad-CAM and SHAP are describing what the classifier actually did.
+
+```bash
+~/venvs/smt/Scripts/python.exe -m src.xai_eval --checkpoint checkpoints/best.pt --data-dir ~/cxr-data-4class --limit 200 --masks ~/Downloads/covid19-radiography/COVID-19_Radiography_Dataset --ood-stats checkpoints/ood.pt
+```
+
+The OOD statistics and the SHAP background are both fingerprint-locked to a
+checkpoint, so a second backbone needs its own before it can be scored:
+
+```bash
+~/venvs/smt/Scripts/python.exe -m src.ood --checkpoint checkpoints/r50_best.pt --data-dir ~/cxr-data-4class --num-workers 4 --out checkpoints/r50_ood.pt
+~/venvs/smt/Scripts/python.exe -m src.shap_utils --fit --checkpoint checkpoints/r50_best.pt --data-dir ~/cxr-data-4class --num-workers 4 --background checkpoints/r50_shap_background.pt
+~/venvs/smt/Scripts/python.exe -m src.xai_eval --checkpoint checkpoints/r50_best.pt --data-dir ~/cxr-data-4class --limit 200 --masks ~/Downloads/covid19-radiography/COVID-19_Radiography_Dataset --ood-stats checkpoints/r50_ood.pt --background checkpoints/r50_shap_background.pt --report-dir reports/resnet50
+```
+
+200 test images sampled at random across the split (33 COVID19, 48
+LUNG_OPACITY, 102 NORMAL, 17 PNEUMONIA — it samples rather than taking the
+first N, which on a class-sorted `ImageFolder` would have been 200 COVID-19
+films wearing a split-wide label). The sample and the random controls come from
+a seeded generator, so both backbones below score **the identical 200 images
+under the identical control orderings**:
+
+| | resnet18 | random | gap | resnet50 | random | gap |
+|---|---|---|---|---|---|---|
+| deletion AUC *(lower better)* | 0.4503 | 0.4400 | +0.0103 | 0.4282 | 0.2738 | **+0.1543** |
+| insertion AUC *(higher better)* | 0.7764 | 0.4364 | +0.3400 | **0.8700** | 0.2740 | **+0.5960** |
+| deletion steps refused as OOD | | | 59.7% | | | **72.6%** |
+
+Deletion and insertion are from Petsiuk et al. 2018. Both are reported against
+a random pixel ordering because an AUC on its own has no scale — a map that
+ranks pixels arbitrarily still produces a curve, and only the gap means
+anything.
+
+**The raw AUCs are not comparable between the two models, which is the first
+thing this table is for.** resnet50's probability collapses much faster under
+random perturbation (random insertion 0.2740 against resnet18's 0.4364), so its
+curves start somewhere else entirely. Reading its 0.8700 next to resnet18's
+0.7764 and concluding the bigger model is better explained compares two numbers
+measured from different origins. By the gap — the only comparable part — it
+genuinely is better localised: +0.5960 against +0.3400.
+
+**Insertion works and deletion does not, on both.** Restoring the pixels
+Grad-CAM ranks highest recovers the prediction far faster than restoring random
+ones. Deleting them destroys it no faster than deleting random ones — slower,
+in fact, the gap being positive on both models when it should be negative. The
+two metrics are supposed to agree.
+
+The reason is measurable here rather than arguable, which is the point of
+running the OOD check alongside: **59.7% of resnet18's deletion steps and 72.6%
+of resnet50's are refused by that model's own out-of-distribution detector.**
+Blanking pixels produces something that is no longer a chest X-ray, so a
+probability that falls after deletion is partly reporting "this is not a
+radiograph" rather than "the evidence is gone".
+
+The second backbone turns that from a story into a prediction that held: the
+model with more off-distribution perturbations is the one whose deletion result
+is further wrong, *while being the better-localised model on insertion*. The
+two metrics rank the backbones in opposite orders and the refusal rate says
+which ranking to believe. **Quote the insertion gap; the deletion number is
+measuring the baseline as much as the map.**
+
+### Is the heat inside the lungs?
+
+| | resnet18 | resnet50 |
+|---|---|---|
+| Grad-CAM mass inside the lung fields | 0.324 | 0.304 |
+| lung fields as a share of the image | 0.238 | 0.238 |
+| **enrichment** | **1.359** | **1.274** |
+
+Read the last row. A map that has localised nothing already puts about a
+quarter of its mass in the lungs, because the lungs are about a quarter of a
+chest radiograph, so 0.324 on its own is close to meaningless. Enrichment is
+the ratio, and 1.0 is exactly what a uniform map achieves. At 1.36 and 1.27 the
+heatmaps are pointing at the lungs — modestly. Note that resnet50, the better
+model on insertion, is slightly *worse* here: staying inside the lung fields
+and finding the evidence are not the same property.
+
+**This is not IoU against annotated pathology**, and the difference is large
+enough to state twice. The masks shipped with the Radiography Database segment
+*lungs*, not findings, so a map covering both entire lungs scores perfectly
+here while having localised nothing in particular. Real explanation-fidelity
+IoU needs boxes this dataset does not carry — the RSNA Pneumonia Detection set,
+or the 984 annotated images in NIH ChestX-ray14.
+
+### Do similar cases get similar explanations?
+
+| mean pairwise cosine | resnet18 *(512-d)* | resnet50 *(2048-d)* |
+|---|---|---|
+| within class | 0.6076 | 0.3118 |
+| all pairs *(control)* | 0.3142 | 0.1479 |
+| **ratio** | **1.93** | **2.11** |
+
+**The absolute numbers halve between the models and the ratio does not move.**
+That is the clearest demonstration here of why the control is load-bearing.
+Cosine similarity falls with dimension as pure geometry, so resnet50's 0.31
+read alone suggests its explanations are half as consistent; against its own
+control they are, if anything, marginally more so. An absolute
+attribution-similarity figure does not transfer between architectures.
+
+The control is not optional within one model either. Every SHAP vector here is
+`w ⊙ (x − E[x])` for one shared `w`, so any two of them agree in direction
+before anything about the images is considered, and a within-class figure read
+alone is partly reporting arithmetic. At roughly double the control on both
+networks, the consistency is real.
+
+**The top 15 features account for 15.1% of the total movement on resnet18 and
+14.2% on resnet50.** That is the number that decides how a bar chart should be
+read, and it is the least comfortable result here: there is no compact
+feature-level explanation of either model's decisions. A chart of 15 bars is a
+sample of the reasoning, not a summary of it, and `/analyze` returns the
+coverage alongside the bars so a client cannot present them as "the reason"
+without contradicting the payload it was sent.
+
+The two look alike in that row and are not alike underneath it: resnet50
+spreads its attribution over 2,048 features rather than 512, so reaching a
+comparable 14.2% in fifteen of them is **19.3x** the uniform expectation
+against resnet18's 5.2x. Raw coverage governs the caption; concentration over
+uniform governs whether the representation is distributed.
+
 ## Results
 
 resnet18, COVID-19 Radiography Database, 21,165 images split 70/15/15 with the
 two-stage recipe above. Test set, 3,175 images:
 
-| four-class | macro F1 | accuracy | COVID19 F1 | LUNG_OPACITY F1 | NORMAL F1 | PNEUMONIA F1 |
-|---|---|---|---|---|---|---|
-| as downloaded | 0.9587 | 0.9524 | 0.982 | 0.929 | 0.953 | 0.970 |
+| four-class | macro F1 | accuracy | macro AUC | COVID19 F1 | LUNG_OPACITY F1 | NORMAL F1 | PNEUMONIA F1 |
+|---|---|---|---|---|---|---|---|
+| resnet18, as downloaded | 0.9587 | 0.9524 | 0.9928 | 0.982 | 0.929 | 0.953 | 0.970 |
+| resnet50, as downloaded | 0.9576 | 0.9512 | 0.9937 | 0.982 | 0.925 | 0.952 | 0.970 |
+
+**resnet50 buys nothing.** 2.1x the parameters (23.52M against 11.18M) moves
+macro F1 by −0.0011 and macro AUC by +0.0009, in opposite directions, and
+leaves COVID19 and PNEUMONIA F1 identical to three places. Both differences are
+an order of magnitude smaller than what masking the lungs costs. Each
+configuration was trained once, so that is not a significance claim — but the
+straightforward reading is that if a large part of the score is available from
+acquisition signature, the smaller network has already taken it and extra
+capacity has nothing left to buy. Reproduce with:
+
+```bash
+~/venvs/smt/Scripts/python.exe -m src.train --epochs 15 --freeze-backbone --num-workers 4 --backbone resnet50 --data-dir ~/cxr-data-4class --out checkpoints/r50_stage1.pt
+~/venvs/smt/Scripts/python.exe -m src.train --epochs 25 --lr 1e-4 --num-workers 4 --data-dir ~/cxr-data-4class --resume checkpoints/r50_stage1.pt --out checkpoints/r50_best.pt
+~/venvs/smt/Scripts/python.exe -m src.evaluate --checkpoint checkpoints/r50_best.pt --data-dir ~/cxr-data-4class --split test --report-dir reports/resnet50
+```
+
+Per-class one-vs-rest AUC, resnet18: COVID19 0.9993, LUNG_OPACITY 0.9858,
+NORMAL 0.9870, PNEUMONIA 0.9992. AUC is threshold-free, so it asks whether the model *ranks*
+the positives above the negatives rather than whether argmax lands correctly.
+That makes it the number least disturbed by the class imbalance and the number
+furthest from what the served model does, since serving takes an argmax. It is
+in the table because a reader will ask for it; read the per-class recall.
 
 **Do not quote these on their own.** The classes in this dataset are 100%
 separable by provenance — see [What this is not](#what-this-is-not) — so a high
@@ -358,10 +587,10 @@ becoming visible rather than one being introduced.
 
 ### The lung-masking check
 
-| four-class | macro F1 | accuracy | COVID19 F1 | LUNG_OPACITY F1 | NORMAL F1 | PNEUMONIA F1 |
-|---|---|---|---|---|---|---|
-| as downloaded | 0.9587 | 0.9524 | 0.982 | 0.929 | 0.953 | 0.970 |
-| lungs only    | 0.9341 | 0.9298 | 0.926 | 0.899 | 0.944 | 0.967 |
+| four-class | macro F1 | accuracy | macro AUC | COVID19 F1 | LUNG_OPACITY F1 | NORMAL F1 | PNEUMONIA F1 |
+|---|---|---|---|---|---|---|---|
+| as downloaded | 0.9587 | 0.9524 | 0.9928 | 0.982 | 0.929 | 0.953 | 0.970 |
+| lungs only    | 0.9341 | 0.9298 | 0.9898 | 0.926 | 0.899 | 0.944 | 0.967 |
 
 The second row is the same recipe trained on a mirror of the same split with
 every non-lung pixel zeroed. Roughly 77% of each image is removed, including all
@@ -396,6 +625,7 @@ amounts:
 | | COVID19 | LUNG_OPACITY | NORMAL | PNEUMONIA |
 |---|---|---|---|---|
 | F1 lost to masking | −0.056 | −0.030 | −0.009 | −0.003 |
+| AUC lost to masking | −0.0040 | −0.0057 | −0.0015 | −0.0011 |
 
 COVID-19 loses six times what NORMAL does and nearly twenty times what pneumonia
 does, and its recall falls 0.976 → 0.911. It is the only class with unique
@@ -403,6 +633,15 @@ provenance, so it is the class with the most artifact to lose. The three-class
 version of this experiment found the same thing at half the magnitude (−0.032
 against −0.013 and −0.015), so the effect has now reproduced across two
 different class lists.
+
+**The AUC row qualifies that, and it is worth reading before quoting the F1
+one.** Macro AUC falls only 0.9928 → 0.9898 where macro F1 falls 0.9587 →
+0.9341 — the ranking survives masking nearly intact while the decisions do not.
+And on AUC the per-class ordering does not hold: LUNG_OPACITY loses slightly
+more than COVID19. So most of what masking costs COVID-19 is the model's
+ability to put its decision boundary in the right place, not its ability to
+tell the class apart at all. That is a smaller claim than the F1 row on its own
+suggests, and both numbers come out of the same `src.evaluate` run.
 
 LUNG_OPACITY, measured this way for the first time, sits mid-table. It loses
 more than NORMAL or PNEUMONIA and less than half what COVID-19 does, which is
@@ -507,6 +746,29 @@ does not establish that it reads pathology rather than provenance.
 - `POST /explain` — multipart `file`, optional `class_name`. Returns the overlay
   PNG. `X-Prediction` is what the model called it; `X-Explained-Class` is what
   the heatmap answers for. They differ whenever `class_name` is passed.
+- `POST /analyze` — multipart `file`, optional `class_name` and `top_k`.
+  Prediction, probabilities, the out-of-distribution verdict, the Grad-CAM
+  overlay as base64 PNG and the SHAP summary, in one JSON response.
+
+  It exists because the two explanations are meant to be read together — the
+  heatmap says where, the attributions say how much — and delivering them in
+  separate round trips invites a caller to show one and drop the other.
+  `/predict` and `/explain` are unchanged; a client that only wants the picture
+  should not have to base64-decode it.
+
+  The `shap` block carries `base_value`, `sum_of_contributions` and `logit` so a
+  caller can check that the decomposition it is being shown actually adds up,
+  and `coverage` so it can see how much of the reasoning the listed features
+  represent — about 15% for the default 15. It is `null` when no background is
+  loaded, meaning the attribution was **not computed**, not that nothing
+  contributed. The API reads the background from `CXR_SHAP_BACKGROUND` (default
+  `checkpoints/shap_background.pt`) and refuses one fitted against a different
+  checkpoint, for the same reason it refuses mismatched OOD statistics.
+
+  The overlay is base64 rather than a URL because nothing here stores images. An
+  endpoint handing back a link would need somewhere to put the upload, and a
+  research prototype that starts retaining chest X-rays has acquired a problem
+  it does not want.
 
 Port 8100, so it does not collide with the triage backend on 8000.
 
@@ -629,6 +891,16 @@ held-out test split:
 5%, so it is the three-class figure that was the outlier — the four-class rates
 are what this knob has been promising all along. If you were reading 3.8% as the
 price of the check, the price is 5%.
+
+Fitted against `r50_best.pt` the same recipe refuses COVID19 3.9%,
+LUNG_OPACITY 5.5%, NORMAL 4.6% and **PNEUMONIA 8.9%** — pooled 5.0%, identically,
+because p95 guarantees it. Two things follow. The pooled row carries no
+information at all and only the per-class ones do. And the larger model's
+abstention falls hardest on the *smallest* class, which is the same trap as
+reading accuracy instead of per-class recall, one level down. The cutoffs
+themselves (2602–6437) are not comparable to resnet18's: the distance is
+measured in 2,048 dimensions rather than 512, so only refusal rates transfer
+between backbones.
 
 `--percentile` is the knob, and it has a cost on both sides: the default 95
 spends about one real X-ray in twenty to catch inputs like the six above.

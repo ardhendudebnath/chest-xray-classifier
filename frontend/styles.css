@@ -215,6 +215,60 @@ h2 { font-size: .95rem; margin: 0 0 var(--s3); letter-spacing: -.01em; }
 .bar-row.top .bar-name { font-weight: 650; }
 .bar-row:not(.top) .bar-fill { opacity: .45; }
 
+/* ------------------------------------------------------------------- shap */
+
+/* Diverging bars growing out of a centre line. Sign is carried by direction
+ * first and tone second, never by red against green: strong colour on this
+ * page is reserved for the warnings, and a red bar beside a disease name reads
+ * as a verdict the model is not entitled to give. */
+.shap-bars { display: grid; gap: var(--s2); margin: var(--s3) 0 var(--s4); }
+
+.shap-row {
+  display: grid;
+  grid-template-columns: 5.5rem 1fr 4rem;
+  align-items: center;
+  gap: var(--s2);
+  font-size: .78rem;
+}
+.shap-name,
+.shap-value { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.shap-value { text-align: right; }
+
+.shap-track {
+  position: relative;
+  height: 10px;
+  background: var(--bg-sunken);
+  border-radius: 999px;
+}
+/* The zero line. Every bar starts here and grows one way or the other, so a
+ * reader can see the sign without reading the number. */
+.shap-track::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: -2px;
+  bottom: -2px;
+  width: 1px;
+  background: var(--border);
+}
+
+.shap-fill {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  border-radius: 999px;
+  transition: width .35s ease;
+}
+.shap-fill.pos { left: 50%; background: var(--brand); }
+.shap-fill.neg { right: 50%; background: var(--text-muted); }
+
+.shap-note {
+  background: var(--bg-sunken);
+  border-radius: var(--radius);
+  padding: var(--s3);
+  margin: 0 0 var(--s3);
+}
+
 /* --------------------------------------------------------------- grad-cam */
 
 .cam { margin: var(--s4) 0 0; }
