@@ -12,16 +12,31 @@ table so nothing here has to be taken on trust.
 | `draft_sections.md` | This file. The corrected prose, section by section, with the reasoning for each change. Edit here first. |
 | `Explainable_ChestXray_Paper_IJSR.docx` | Submission format: A4, two columns, IJSR margins and styles. Built from `IJSR_PaperFormat.docx`, with the wide tables transposed or split to fit a 3.42in column. |
 | `Explainable_ChestXray_Paper_singlecolumn.docx` | The same content in a plain single-column Letter layout. Easier to read and mark up; not a submission format. |
+| `build_ijsr.py`, `build_singlecolumn.py` | What generates the two documents. Each writes its `.docx` beside itself; the IJSR one needs `~/Downloads/IJSR_PaperFormat.docx` as its style source. |
+| `audit_layout.py` | Checks the generated files for tables wider than their column and for labels that cannot fit the cell they are in. Run it after every rebuild. |
 
 Both `.docx` files were generated from the content below, so **this file is the
 source of truth** — change it, then regenerate, rather than editing the Word
 documents and letting the two drift apart.
 
-Neither has been visually proofed: the machine they were built on has no
-LibreOffice, so table wrapping and column balance are unverified. Open the IJSR
-one and check the wider tables before submitting. Two things are deliberately
-absent because they cannot be invented: a contact email in the author block,
-and the Author Profile section the IJSR template ends with.
+```bash
+~/venvs/smt/Scripts/python.exe paper/build_ijsr.py && ~/venvs/smt/Scripts/python.exe paper/audit_layout.py
+```
+
+Both documents were rendered with Word on 2026-08-12 and read page by page. The
+tables all sit inside their columns and no cell breaks a label mid-word. Headings
+carry one set of numbers: the template numbers Heading 1 and 2 automatically, in
+roman and letter, which printed on top of the numbers in the heading text and gave
+"IV. 4. Evaluation and Results". The builder now strips the numbering from those
+styles, keeping the text's own numbers, because the prose says "Section 4.5"
+throughout and a roman numeral cannot carry a subsection.
+
+Still missing, because neither can be invented: a contact email in the author
+block, and the Author Profile section the IJSR template ends with.
+
+In the single-column document, Table 2 splits across a page break, separating the
+ResNet18 and ResNet50 rows that are there to be compared. That document is for
+reading rather than submission, so it is noted and not fixed.
 
 **Reproduce every number in this document:**
 
