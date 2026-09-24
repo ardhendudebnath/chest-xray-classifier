@@ -32,7 +32,17 @@ styles, keeping the text's own numbers, because the prose says "Section 4.5"
 throughout and a roman numeral cannot carry a subsection.
 
 Still missing, because neither can be invented: a contact email in the author
-block, and the Author Profile section the IJSR template ends with.
+block, and the Author Profile section the IJSR template ends with. Both are
+constants at the top of `build_ijsr.py` — `EMAIL` and `PROFILE`. Fill either in and
+it appears where the template puts it, the address under the affiliation and the
+biography in the template's own `AutoBiography` style; leave it empty and it is
+left out rather than printed as a placeholder, since a heading standing over
+`<Author Photo>` reads as an oversight where a missing section reads as a gap.
+
+The last page's columns are balanced, which the template asks for in as many
+words. The document ends on a continuous section break, which is what gives Word
+leave to equalise them; before that, the references filled the left column and
+left the right one empty.
 
 In the single-column document, Table 2 splits across a page break, separating the
 ResNet18 and ResNet50 rows that are there to be compared. That document is for

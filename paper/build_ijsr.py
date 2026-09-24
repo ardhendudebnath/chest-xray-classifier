@@ -18,6 +18,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE = os.path.expanduser(r'~\Downloads\IJSR_PaperFormat.docx')
 OUT = os.path.join(HERE, 'Explainable_ChestXray_Paper_IJSR.docx')
 
+# The author block. EMAIL and PROFILE are the two things the paper still needs and
+# that nobody but the author can supply, so they are stated here rather than buried
+# in the body: fill either one in and it appears, leave it empty and it is omitted
+# rather than printed as a placeholder. The template wants the address on its own
+# line under the affiliation, and ends with a short third-person profile.
+AUTHOR = 'Ardhendu Debnath'
+AFFILIATION = ('Department of Computer Science Engineering (AI & ML), '
+               'Jain University, Bengaluru, India')
+EMAIL = ''      # e.g. 'name@domain' — printed under the affiliation
+PROFILE = ''    # a short third-person biography, for the Author Profile section
+
 doc = Document(TEMPLATE)
 
 # Strip the template's sample content, keeping the trailing sectPr so page size,
@@ -192,9 +203,10 @@ t = para('Explainable Deep Learning for Multi-Class Chest X-ray Classification: 
          style='Text', align=WD_ALIGN_PARAGRAPH.CENTER, size=20, bold=True)
 t.paragraph_format.space_after = Pt(8)
 
-para('Ardhendu', style='Text', align=WD_ALIGN_PARAGRAPH.CENTER, size=11, bold=True)
-para('Department of Computer Science Engineering (AI & ML), Jain University, Bengaluru, India',
-     style='Normal', align=WD_ALIGN_PARAGRAPH.CENTER, size=9)
+para(AUTHOR, style='Text', align=WD_ALIGN_PARAGRAPH.CENTER, size=11, bold=True)
+para(AFFILIATION, style='Normal', align=WD_ALIGN_PARAGRAPH.CENTER, size=9)
+if EMAIL:
+    para(EMAIL, style='Normal', align=WD_ALIGN_PARAGRAPH.CENTER, size=9)
 
 # ============================================================== switch to 2 columns
 
@@ -774,6 +786,26 @@ for i, r in enumerate(refs, 1):
     p.paragraph_format.left_indent = Inches(0.22)
     p.paragraph_format.first_line_indent = Inches(-0.22)
     p.paragraph_format.space_after = Pt(2)
+
+# ============================================================== author profile
+
+# The template closes with a photo and a short third-person biography, in its own
+# AutoBiography style. Omitted entirely while PROFILE is empty: a heading standing
+# over a placeholder would read as an oversight, where its absence reads as a gap
+# still to fill.
+if PROFILE:
+    heading('Author Profile', 1)
+    p = doc.add_paragraph(style='AutoBiography')
+    run = p.add_run(PROFILE)
+    run.font.size = Pt(9)
+    run.font.name = 'Times New Roman'
+
+# "Equalize the length of your columns on the last page", says the template. A
+# section that ends in a continuous break is one Word balances, so end on one.
+end = doc.add_section(WD_SECTION.CONTINUOUS)
+c = end._sectPr.find(qn('w:cols'))
+c.set(qn('w:num'), '2')
+c.set(qn('w:space'), '288')
 
 doc.save(OUT)
 print('saved', OUT)
