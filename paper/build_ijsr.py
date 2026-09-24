@@ -26,8 +26,17 @@ OUT = os.path.join(HERE, 'Explainable_ChestXray_Paper_IJSR.docx')
 AUTHOR = 'Ardhendu Debnath'
 AFFILIATION = ('Department of Computer Science Engineering (AI & ML), '
                'Jain University, Bengaluru, India')
-EMAIL = ''      # e.g. 'name@domain' — printed under the affiliation
-PROFILE = ''    # a short third-person biography, for the Author Profile section
+EMAIL = 'ardhendudebnath660@gmail.com'   # an institutional address would be better
+PROFILE = (
+    'Ardhendu Debnath is with the Department of Computer Science Engineering '
+    '(AI & ML), Jain University, Bengaluru, India. His research interests include '
+    'explainable artificial intelligence, medical image classification, and the '
+    'evaluation of explanation methods — in particular the question this paper '
+    'takes up, of what a visual or feature-level explanation establishes about a '
+    'classifier when the dataset itself carries a confound. '
+    '[EDIT BEFORE SUBMISSION: add your degree programme and year, and any prior '
+    'degrees or positions.]'
+)
 
 doc = Document(TEMPLATE)
 
