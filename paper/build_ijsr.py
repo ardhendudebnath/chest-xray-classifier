@@ -33,9 +33,7 @@ PROFILE = (
     'explainable artificial intelligence, medical image classification, and the '
     'evaluation of explanation methods — in particular the question this paper '
     'takes up, of what a visual or feature-level explanation establishes about a '
-    'classifier when the dataset itself carries a confound. '
-    '[EDIT BEFORE SUBMISSION: add your degree programme and year, and any prior '
-    'degrees or positions.]'
+    'classifier when the dataset itself carries a confound.'
 )
 
 doc = Document(TEMPLATE)
