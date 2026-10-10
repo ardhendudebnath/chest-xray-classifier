@@ -44,9 +44,10 @@ words. The document ends on a continuous section break, which is what gives Word
 leave to equalise them; before that, the references filled the left column and
 left the right one empty.
 
-In the single-column document, Table 2 splits across a page break, separating the
-ResNet18 and ResNet50 rows that are there to be compared. That document is for
-reading rather than submission, so it is noted and not fixed.
+Tables in the single-column document are held on one page: every row keeps with
+the row after it, so Word moves a table down whole rather than breaking it. Table 2
+had been landing across a page break with ResNet18 above it and ResNet50 below,
+which put the two rows a reader is meant to compare on separate pages.
 
 **Reproduce every number in this document:**
 

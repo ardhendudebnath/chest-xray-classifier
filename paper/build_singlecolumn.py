@@ -96,6 +96,16 @@ def table(headers, rows, caption=None, widths=None):
             for r in p.runs:
                 r.font.size = Pt(9)
                 r.font.name = 'Times New Roman'
+    # Hold the table on one page. Table 2 was landing across a page break with
+    # ResNet18 above it and ResNet50 below, which puts the two rows a reader is
+    # meant to compare on separate pages. Every row keeps with the one after it,
+    # so Word moves the whole table down rather than splitting it; the last row
+    # keeps with the caption, which sits underneath.
+    for row in t.rows:
+        for cell in row.cells:
+            for p in cell.paragraphs:
+                p.paragraph_format.keep_with_next = True
+
     if caption:
         c = para(caption, align=WD_ALIGN_PARAGRAPH.LEFT, italic=True, size=9)
         c.paragraph_format.space_before = Pt(3)
